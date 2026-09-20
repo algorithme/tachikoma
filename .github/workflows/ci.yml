@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Set up pinned Rust toolchain
+        run: rustup show
+
+      - name: Check formatting
+        run: npm run fmt:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test

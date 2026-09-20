@@ -1,0 +1,13 @@
+{
+  "name": "murmeli",
+  "private": true,
+  "scripts": {
+    "dev": "cargo run --locked -p murmeli-core",
+    "build": "cargo build --workspace --release --locked",
+    "check": "cargo check --workspace --all-targets --locked",
+    "lint": "cargo clippy --workspace --all-targets --locked -- -D warnings",
+    "fmt": "cargo fmt --all",
+    "fmt:check": "cargo fmt --all -- --check",
+    "test": "cargo test --workspace --locked"
+  }
+}
