@@ -1,8 +1,8 @@
 {
-  "name": "murmeli",
+  "name": "tachikoma",
   "private": true,
   "scripts": {
-    "dev": "cargo run --locked -p murmeli-core",
+    "dev": "cargo run --locked -p tachikoma-core",
     "build": "cargo build --workspace --release --locked",
     "check": "cargo check --workspace --all-targets --locked",
     "lint": "cargo clippy --workspace --all-targets --locked -- -D warnings",

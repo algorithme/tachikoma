@@ -32,6 +32,7 @@ mod tests {
 
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let html = std::str::from_utf8(&body).unwrap();
+        assert!(html.contains("<title>Tachikoma</title>"));
         assert!(html.contains("<h1>Hello world</h1>"));
     }
 }

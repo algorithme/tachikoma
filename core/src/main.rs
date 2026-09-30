@@ -19,7 +19,7 @@ async fn main() -> io::Result<()> {
     })?;
 
     println!(
-        "Murmeli core listening on http://{}/",
+        "Tachikoma core listening on http://{}/",
         listener.local_addr()?
     );
 

@@ -9,13 +9,13 @@ pub(crate) struct Config {
 
 impl Config {
     pub(crate) fn from_env() -> io::Result<Self> {
-        let value = match env::var("MURMELI_PORT") {
+        let value = match env::var("TACHIKOMA_PORT") {
             Ok(value) => Some(value),
             Err(env::VarError::NotPresent) => None,
             Err(env::VarError::NotUnicode(_)) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "MURMELI_PORT must be valid Unicode containing a port from 1 to 65535",
+                    "TACHIKOMA_PORT must be valid Unicode containing a port from 1 to 65535",
                 ));
             }
         };
@@ -42,7 +42,7 @@ fn parse_port(value: Option<&str>) -> io::Result<u16> {
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "MURMELI_PORT must be a port from 1 to 65535",
+                "TACHIKOMA_PORT must be a port from 1 to 65535",
             )
         })
 }
@@ -71,7 +71,7 @@ mod tests {
             assert_eq!(
                 parse_port(input).map_err(|error| error.kind()),
                 expected,
-                "MURMELI_PORT={input:?}",
+                "TACHIKOMA_PORT={input:?}",
             );
         }
     }
