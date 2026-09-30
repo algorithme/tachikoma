@@ -22,7 +22,7 @@ subprojects:
     lockfile: Cargo.lock
     manifest_hashes:
       Cargo.toml: "355cf94f346f97b0fb3569c379117b4b64edb0b7371e7d1edae2993cb3ba157d"
-      core/Cargo.toml: "050758f6adfda7d336e1828465a13e864c64fc8268b543ab55bb562fff765e32"
+      core/Cargo.toml: "1232c56b3717e005c0b9ae0eeeecfbce614d5109fd16ffe9b0c2b6df625c9c9e"
     update_commands:
       security: cargo audit
       patch: cargo update
@@ -38,7 +38,7 @@ subprojects:
     excluded: []
     manual-only: []
     notes:
-      - "One virtual workspace (resolver 3), with the unpublished edition-2024 murmeli-core binary in core/ and a shared root Cargo.lock."
+      - "One virtual workspace (resolver 3), with the unpublished edition-2024 tachikoma-core binary in core/ and a shared root Cargo.lock."
       - "Direct dependencies: axum and tokio; test dependency: tower."
       - "rust-toolchain.toml pins Rust 1.98.1 with rustfmt and clippy. CI reads the same file using rustup show; Cargo dependency commands do not update this toolchain pin."
       - "README.md repeats the Rust, Axum, and Tokio versions; keep the documentation consistent when those versions change."
@@ -57,7 +57,7 @@ subprojects:
       - package.json
     lockfile: null
     manifest_hashes:
-      package.json: "b9aaad28b8ae02184696213ba9e279f41a39639e0ddc6418f4bcad4b1428286a"
+      package.json: "ae1c4534643ca650af6cb848cfdf38212158af289e34911a4922936205f7a580"
     update_commands:
       security: ""
       patch: ""
@@ -76,7 +76,7 @@ subprojects:
       - "Skip npm audit, update, and install while this manifest remains dependency-free; do not create a lockfile just for inventory discovery."
       - "When Node dependencies are introduced, choose and record the package manager and lockfile, then refresh to populate its tier commands."
       - "CI uses Node 24; package.json has no engines field. The local Node version at refresh is v26.9.0."
-      - "murmeli-ext/ currently contains only a README and is not yet a Node subproject."
+      - "tachikoma-ext/ currently contains only a README and is not yet a Node subproject."
 
   - id: ci-workflows
     path: .github
@@ -89,7 +89,7 @@ subprojects:
     lockfile: null
     manifest_hashes:
       .github/workflows/ci.yml: "7f9e680762ba05af4d21350ce86cc239a4405f3cabf8e02e160e34595398a4c4"
-      .github/workflows/renovate.yml: "d51e5499291ca6793b892df5266226e70be8f12542e6568d52bb7c1efa9b5017"
+      .github/workflows/renovate.yml: "dafe3c0b1c62b71db22593b5caf3e9cf45d1d9f3bb642f9102ee1bc8b807aabe"
     update_commands:
       security: actionlint
       patch: ""
@@ -104,7 +104,7 @@ subprojects:
     manual-only: []
     notes:
       - "tag-pinned: CI uses full version tags (actions/checkout@v7.0.1 and actions/setup-node@v7.0.0). Preserve this convention; SHA pinning may be considered separately."
-      - "The Renovate workflow uses actions/checkout@v7.0.1 and renovatebot/github-action@v46.3.1. The template's v46 ref does not exist upstream, so a verified full version tag is used. It runs daily at 06:00 UTC and on workflow_dispatch; RENOVATE_TOKEN must be configured before use."
+      - "The Renovate workflow uses actions/checkout@v7.0.1 and renovatebot/github-action@v46.3.6. The template's v46 ref does not exist upstream, so a verified full version tag is used. It runs daily at 06:00 UTC and on workflow_dispatch; RENOVATE_TOKEN must be configured before use."
       - "Patch and minor commands are resolved per external uses reference via the github-actions playbook and GitHub tag lookups; empty strings are not a blanket skip for this ecosystem."
       - "Major action updates always require confirmation under the playbook, and runner changes require manual review; do not treat them as ordinary tag refreshes."
       - "The security tier also queries GitHub advisories per external action and applies fixes individually; actionlint alone is not an advisory scan."

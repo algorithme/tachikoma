@@ -1,8 +1,8 @@
-# Murmeli
+# Tachikoma
 
-Murmeli is your AI sidekick for software engineering: helping review code, take notes, and keep decisions organised. A little Swiss marmot with an eye for bugs and a notebook full of context.
+Tachikoma is a personal AI agent.
 
-The first milestone is a standalone Rust process serving a local **Hello world** page. Future milestones will add Murmeli's application runtime and a TypeScript Visual Studio Code extension that connects to core.
+The current implementation is a standalone Rust process serving a local Hello world page. Agent capabilities will be developed step by step.
 
 ## Prerequisites
 
@@ -30,12 +30,12 @@ Open **http://127.0.0.1:3000/**. The server prints its URL after binding success
 Use a different port on macOS or Linux:
 
 ```sh
-MURMELI_PORT=4000 npm run dev
+TACHIKOMA_PORT=4000 npm run dev
 ```
 
 Then open **http://127.0.0.1:4000/**. Core binds exclusively to `127.0.0.1`; it is accessible from your own machine.
 
-`MURMELI_PORT` defaults to `3000` only when unset. If supplied, it must be an integer from `1` through `65535`. Empty, malformed, zero, out-of-range, and non-Unicode values fail with an error and a nonzero exit status. A port already in use also causes startup to fail; choose another port or stop the process occupying it.
+`TACHIKOMA_PORT` defaults to `3000` only when unset. If supplied, it must be an integer from `1` through `65535`. Empty, malformed, zero, out-of-range, and non-Unicode values fail with an error and a nonzero exit status. A port already in use also causes startup to fail; choose another port or stop the process occupying it.
 
 To inspect the response from another terminal:
 
@@ -43,13 +43,13 @@ To inspect the response from another terminal:
 curl -i http://127.0.0.1:3000/
 ```
 
-Expect HTTP `200`, `Content-Type: text/html; charset=utf-8`, and a page containing `<h1>Hello world</h1>`.
+Expect HTTP `200`, `Content-Type: text/html; charset=utf-8`, and a page containing `<title>Tachikoma</title>` and `<h1>Hello world</h1>`.
 
 To build and launch the standalone executable:
 
 ```sh
 npm run build
-./target/release/murmeli-core
+./target/release/tachikoma-core
 ```
 
 The HTML is embedded in the executable at compile time, so the binary can run from any working directory without a separate assets folder. After editing `core/web/index.html`, stop and restart `npm run dev`, or rebuild the release executable, to include the changes. There is no automatic reload yet.
@@ -57,7 +57,7 @@ The HTML is embedded in the executable at compile time, so the binary can run fr
 ## Project organization
 
 ```text
-murmeli/
+tachikoma/
 |-- Cargo.toml                  Rust workspace; core is its only member
 |-- Cargo.lock                  Resolved Rust dependencies, tracked in Git
 |-- rust-toolchain.toml         Compiler and tooling versions
@@ -65,7 +65,7 @@ murmeli/
 |-- README.md                   Setup, behavior, and structure
 |-- .github/workflows/ci.yml    Formatting, linting, and tests
 |-- core/
-|   |-- Cargo.toml              Binary package: murmeli-core
+|   |-- Cargo.toml              Binary package: tachikoma-core
 |   |-- src/
 |   |   |-- common/
 |   |   |   |-- mod.rs          Exposes the config module
@@ -74,13 +74,13 @@ murmeli/
 |   |   `-- web.rs              Router, HTML handler, route test
 |   `-- web/
 |       `-- index.html          HTML embedded by include_str!
-`-- murmeli-ext/
-    `-- README.md              Future TypeScript VS Code extension
+`-- tachikoma-ext/
+    `-- README.md              Optional future TypeScript VS Code client
 ```
 
 The root is a virtual Cargo workspace using resolver `3`. It owns the shared lockfile and `target/` build directory. `core` is a single unpublished Rust binary package using edition **2024**, **Axum 0.8.9** for HTTP routing, and **Tokio 1.53.1** for asynchronous execution. Axum enables only `http1` and `tokio`; Tokio enables `macros`, `net`, and `rt-multi-thread`. Tower `0.5` with `util` is used only in tests.
 
-The root build currently builds core. `murmeli-ext` reserves the location for the future extension; it has no package or build step yet. Tokio is the asynchronous runtime for the server; Murmeli's future application runtime is still to be implemented.
+The root build currently builds core. `tachikoma-ext` reserves a location for an optional future TypeScript Visual Studio Code client; it has no package, implementation, or build step yet, and no connection protocol has been selected. Tokio is the asynchronous runtime for the server; Tachikoma's agent capabilities are still to be implemented.
 
 ```text
 Terminal                         core process
@@ -116,7 +116,7 @@ Browser                               |
 | Function | Responsibility |
 | --- | --- |
 | `async main() -> io::Result<()>` | Load configuration once, bind the listener, print the URL, and serve |
-| `Config::from_env() -> io::Result<Self>` | Read `MURMELI_PORT`, validate it, and construct the settings |
+| `Config::from_env() -> io::Result<Self>` | Read `TACHIKOMA_PORT`, validate it, and construct the settings |
 | `Config::bind_addr(&self) -> SocketAddr` | Combine IPv4 loopback (`127.0.0.1`) with the configured port |
 | `parse_port(value: Option<&str>) -> io::Result<u16>` | Apply the default or validate an explicit port; private to the config module and independent of the environment |
 | `pub(crate) build_router() -> Router` | Register `GET /` for startup and route testing |
@@ -130,7 +130,7 @@ Run these commands from the repository root:
 
 | Command | Underlying command |
 | --- | --- |
-| `npm run dev` | `cargo run --locked -p murmeli-core` |
+| `npm run dev` | `cargo run --locked -p tachikoma-core` |
 | `npm run build` | `cargo build --workspace --release --locked` |
 | `npm run check` | `cargo check --workspace --all-targets --locked` |
 | `npm run lint` | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
@@ -142,7 +142,7 @@ Run these commands from the repository root:
 
 The focused tests provide confidence in two observable contracts:
 
-- The route test invokes the router without opening a TCP socket and checks status `200`, the HTML content type, and the Hello world heading.
+- The route test invokes the router without opening a TCP socket and checks status `200`, the HTML content type, the Tachikoma page title, and the Hello world heading.
 - The table-driven port test in `common/config.rs` checks the default, accepted values including both bounds, and invalid inputs. It does not change global environment variables.
 
 Tests live beside the corresponding functions under `#[cfg(test)]`. Run them with `npm test`. To perform the same checks as CI:
@@ -154,3 +154,9 @@ npm test
 ```
 
 GitHub Actions runs these checks in one Ubuntu job on pushes and pull requests, with read-only repository permissions. It uses Node 24 and the Rust toolchain selected by `rust-toolchain.toml`; npm caching is disabled because there are no npm dependencies.
+
+## Future direction
+
+Future work includes collaboration with local and remote agents through messaging, forums, and tools developed by the agent community. These capabilities are not implemented yet.
+
+Visual Studio Code remains an optional future client, with its placeholder in `tachikoma-ext`.
