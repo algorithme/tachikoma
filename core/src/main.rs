@@ -4,7 +4,10 @@ use tokio::net::TcpListener;
 
 use common::config::Config;
 
+mod auth;
+mod clients;
 mod common;
+mod llm;
 mod web;
 
 #[tokio::main]
@@ -23,5 +26,6 @@ async fn main() -> io::Result<()> {
         listener.local_addr()?
     );
 
-    axum::serve(listener, web::build_router()).await
+    let address = listener.local_addr()?;
+    axum::serve(listener, web::build_router(config.llm, address)).await
 }

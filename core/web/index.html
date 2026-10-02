@@ -3,9 +3,50 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
     <title>Tachikoma</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/app.js" defer></script>
   </head>
   <body>
-    <h1>Hello world</h1>
+    <main>
+      <header>
+        <p class="eyebrow">Tachikoma · Local workspace</p>
+        <h1>Start with a prompt.</h1>
+        <p>Connect a provider, choose your billing method, and ask your first question.</p>
+      </header>
+      <section aria-labelledby="connection-heading">
+        <h2 id="connection-heading">1. Choose a connection</h2>
+        <label for="connection">Provider and authentication</label>
+        <select id="connection" disabled>
+          <option value="">Choose a connection…</option>
+          <option value="openai_subscription">OpenAI · ChatGPT subscription</option>
+          <option value="openai_api_key">OpenAI · API key</option>
+          <option value="anthropic_api_key">Anthropic · API key</option>
+        </select>
+        <p id="billing" class="muted">Your prompt is sent only when you press Invoke.</p>
+        <p id="configuration" class="configuration" role="status">Loading connection settings…</p>
+        <div id="subscription-actions" class="actions" hidden>
+          <button id="login" type="button">Continue with ChatGPT</button>
+          <button id="disconnect" type="button" class="secondary" hidden>Disconnect</button>
+          <a href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">Manage usage in ChatGPT settings ↗</a>
+        </div>
+      </section>
+      <section aria-labelledby="prompt-heading">
+        <h2 id="prompt-heading">2. Invoke</h2>
+        <form id="prompt-form">
+          <label for="prompt">Prompt</label>
+          <textarea id="prompt" rows="5" maxlength="12000" placeholder="What would you like to ask?" required></textarea>
+          <p class="muted">Each prompt is an independent request. The selected provider receives your prompt; Tachikoma does not save your conversation.</p>
+          <button id="invoke" type="submit" disabled>Invoke</button>
+        </form>
+        <p id="message" role="status" aria-live="polite"></p>
+      </section>
+      <section id="response-section" aria-labelledby="response-heading" hidden>
+        <h2 id="response-heading">Response</h2>
+        <pre id="response"></pre>
+      </section>
+      <footer>API keys stay in the local backend. Subscription credentials use your operating system’s credential store.</footer>
+    </main>
   </body>
 </html>
