@@ -16,7 +16,7 @@ pub(crate) enum ProviderKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum OpenAIAuthMode {
+pub enum OpenAIAuthMode {
     ApiKey,
     Subscription,
 }
@@ -30,11 +30,11 @@ pub(crate) struct LLMProviderConfig {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RetryConfig {
-    pub(crate) max_retries: u32,
-    pub(crate) initial_delay: Duration,
-    pub(crate) max_delay: Duration,
-    pub(crate) timeout: Duration,
+pub struct RetryConfig {
+    pub max_retries: u32,
+    pub initial_delay: Duration,
+    pub max_delay: Duration,
+    pub timeout: Duration,
 }
 
 impl Default for RetryConfig {
@@ -49,6 +49,13 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
+    pub(crate) fn is_valid(&self) -> bool {
+        !self.initial_delay.is_zero()
+            && self.initial_delay <= self.max_delay
+            && self.max_delay <= self.timeout
+            && self.timeout <= Duration::from_secs(3600)
+    }
+
     fn from_lookup(
         lookup: &mut impl FnMut(&str) -> io::Result<Option<String>>,
     ) -> io::Result<Self> {
@@ -97,26 +104,26 @@ impl RetryConfig {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct OpenAIConfig {
-    pub(crate) model: Option<String>,
-    pub(crate) preferred_auth: Option<OpenAIAuthMode>,
-    pub(crate) api_key: Option<SecretString>,
+pub struct OpenAIConfig {
+    pub model: Option<String>,
+    pub preferred_auth: Option<OpenAIAuthMode>,
+    pub api_key: Option<SecretString>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct AnthropicConfig {
-    pub(crate) model: Option<String>,
-    pub(crate) api_key: Option<SecretString>,
-    pub(crate) max_tokens: u32,
-    pub(crate) workspace_id: Option<String>,
+pub struct AnthropicConfig {
+    pub model: Option<String>,
+    pub api_key: Option<SecretString>,
+    pub max_tokens: u32,
+    pub workspace_id: Option<String>,
 }
 
 /// A backend-only credential whose debug output never contains its value.
 #[derive(Clone)]
-pub(crate) struct SecretString(String);
+pub struct SecretString(String);
 
 impl SecretString {
-    pub(crate) fn new(value: impl Into<String>) -> io::Result<Self> {
+    pub fn new(value: impl Into<String>) -> io::Result<Self> {
         let value = value.into();
         if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
             return Err(invalid_input(

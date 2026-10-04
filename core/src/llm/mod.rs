@@ -1,20 +1,40 @@
-//! Stateless text invocation. Providers own their credentials; callers supply only a prompt.
+//! Model transport contracts. Clients own credentials; agents own conversation state.
 
 use std::{fmt, future::Future, time::Duration};
 
-pub(crate) mod anthropic;
+pub mod models;
 mod retry;
+
+pub use models::*;
 
 pub(super) use retry::request_with_retry;
 
-pub(crate) trait LLMChat: Send + Sync {
+pub trait LLMChat: Send + Sync {
+    fn complete(
+        &self,
+        request: LLMRequest<'_>,
+    ) -> impl Future<Output = Result<LLMResponse, LLMError>> + Send;
+
     /// Return a completed text response. Each invocation is an independent conversation.
-    fn invoke(&self, prompt: &str) -> impl Future<Output = Result<String, LLMError>> + Send;
+    fn invoke(&self, prompt: &str) -> impl Future<Output = Result<String, LLMError>> + Send {
+        async move {
+            if prompt.trim().is_empty() {
+                return Err(LLMError::InvalidPrompt);
+            }
+            self.complete(LLMRequest {
+                system_prompt: "",
+                messages: &[LLMMessage::User(prompt.to_owned())],
+                tools: &[],
+            })
+            .await?
+            .into_text()
+        }
+    }
 }
 
 /// Deliberately excludes provider bodies and transport diagnostics, which can contain secrets.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum LLMError {
+pub enum LLMError {
     Configuration(&'static str),
     InvalidPrompt,
     Authentication(crate::auth::AuthError),

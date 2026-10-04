@@ -22,17 +22,22 @@ struct AttemptError {
 }
 
 /// One deadline covers all HTTP attempts, backoff waits, and response reading.
-pub(crate) async fn request_with_retry<F, Fut, R, ReadFut>(
+pub(crate) async fn request_with_retry<F, Fut, R, ReadFut, T>(
     config: RetryConfig,
     mut send: F,
     read: R,
-) -> Result<String, LLMError>
+) -> Result<T, LLMError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<Response, reqwest::Error>>,
     R: FnOnce(Response) -> ReadFut,
-    ReadFut: Future<Output = Result<String, LLMError>>,
+    ReadFut: Future<Output = Result<T, LLMError>>,
 {
+    if !config.is_valid() {
+        return Err(LLMError::Configuration(
+            "Retry delays must be positive and ordered within a timeout of at most one hour.",
+        ));
+    }
     let deadline = Instant::now() + config.timeout;
     timeout_at(deadline, async {
         let backoff = ExponentialBuilder::default()
@@ -121,6 +126,37 @@ mod tests {
 
     async fn read_ok(_: Response) -> Result<String, LLMError> {
         Ok("completed".into())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invalid_library_retry_settings_fail_before_sending() {
+        for config in [
+            RetryConfig {
+                initial_delay: Duration::ZERO,
+                ..config(2)
+            },
+            RetryConfig {
+                max_delay: Duration::from_secs(31),
+                ..config(2)
+            },
+            RetryConfig {
+                timeout: Duration::from_secs(3601),
+                ..config(2)
+            },
+        ] {
+            let attempts = Cell::new(0);
+            let result = request_with_retry(
+                config,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    ready(Ok(response(200, None)))
+                },
+                read_ok,
+            )
+            .await;
+            assert!(matches!(result, Err(LLMError::Configuration(_))));
+            assert_eq!(attempts.get(), 0);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -221,7 +257,7 @@ mod tests {
                 attempts.set(attempts.get() + 1);
                 ready(Ok(response(200, None)))
             },
-            |_| ready(Err(LLMError::IncompleteResponse)),
+            |_| ready(Err::<String, _>(LLMError::IncompleteResponse)),
         )
         .await;
         assert_eq!(result, Err(LLMError::IncompleteResponse));
@@ -246,7 +282,7 @@ mod tests {
                     Ok(response(status, Some("1")))
                 }
             },
-            |_| pending(),
+            |_| pending::<Result<String, LLMError>>(),
         )
         .await;
         assert_eq!(result, Err(LLMError::Timeout));
