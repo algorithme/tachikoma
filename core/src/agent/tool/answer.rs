@@ -17,7 +17,7 @@ impl AnswerTool {
         Self {
             definition: ToolDefinition {
                 name: "answer".into(),
-                description: "Return the answer as a dictionary matching the input schema. When configured as a final tool, call it alone to complete the invocation.".into(),
+                description: "The default terminal tool to call when the task is complete. Pass the answer itself as a dictionary matching the input schema; it is returned unchanged. If answer is listed among this agent's configured final tools, call it alone to finish the invocation. Otherwise, finish using one of the configured final tools.".into(),
                 input_schema: validator.schema().clone(),
             },
             validator,
