@@ -1,0 +1,41 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; color: #20312c; background: #f5f7f4; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 780px; margin: 0 auto; padding: 56px 24px 32px; }
+header { margin-bottom: 36px; }
+h1 { font-size: clamp(2rem, 5vw, 3rem); letter-spacing: -.04em; margin: 8px 0 12px; line-height: 1.1; }
+h2 { font-size: 1.05rem; margin: 0 0 20px; }
+p { line-height: 1.6; }
+.eyebrow { font-size: .78rem; text-transform: uppercase; letter-spacing: .1em; color: #526b5e; }
+section { margin: 20px 0; padding: 26px; background: #fff; border: 1px solid #dce4dc; border-radius: 12px; }
+label { display: block; font-size: .85rem; font-weight: 650; margin-bottom: 8px; }
+select, textarea { width: 100%; border: 1px solid #b4c2b8; border-radius: 6px; background: #fff; color: inherit; padding: 12px; font: inherit; }
+textarea { resize: vertical; min-height: 140px; line-height: 1.55; }
+select:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible { outline: 3px solid #78b692; outline-offset: 3px; }
+button { border: 1px solid #2d5945; border-radius: 6px; color: white; background: #2d5945; padding: 11px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+button:hover:enabled { background: #214634; }
+button:disabled { opacity: .5; cursor: default; }
+button.secondary { background: transparent; color: #2d5945; }
+button.secondary:hover:enabled { background: #edf4ed; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.actions a { font-size: .85rem; }
+a { color: #2d5945; text-underline-offset: 3px; }
+.muted, footer { font-size: .84rem; color: #657268; }
+.configuration { font-size: .9rem; padding: 12px 14px; background: #f1f5ef; border-radius: 6px; overflow-wrap: anywhere; }
+#message:empty { display: none; }
+#message { font-size: .9rem; margin-bottom: 0; }
+.error { color: #a2362c; }
+pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.65; }
+footer { line-height: 1.6; margin-top: 28px; }
+[hidden] { display: none !important; }
+@media (max-width: 520px) { main { padding: 30px 16px; } section { padding: 20px; } }
+@media (prefers-color-scheme: dark) {
+  :root { color: #e1e9e3; background: #15201b; }
+  section { background: #1b2a22; border-color: #34483b; }
+  select, textarea { color: #e1e9e3; background: #15201b; border-color: #526557; }
+  .configuration { background: #24362b; }
+  .muted, footer, .eyebrow { color: #a9b9ad; }
+  a, button.secondary { color: #b4d9bf; }
+  button.secondary:hover:enabled { background: #24362b; }
+  .error { color: #f0aa9b; }
+}
