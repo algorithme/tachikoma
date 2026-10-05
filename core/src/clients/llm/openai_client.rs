@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde_json::{Value, json};
 
 use crate::{
@@ -5,9 +7,19 @@ use crate::{
     common::config::{OpenAIConfig, RetryConfig},
     llm::{
         AssistantReplay, LLMChat, LLMError, LLMMessage, LLMRequest, LLMResponse,
-        MAX_RESPONSE_BYTES, ToolArguments, ToolCall, http_client, request_with_retry,
+        MAX_RESPONSE_BYTES, ToolArguments, ToolCall, ToolSchemaMode, http_client,
+        request_with_retry,
     },
 };
+
+use super::tool_schema::{ToolProvider, strict_tools};
+
+const TOOL_NAMESPACE: &str = "tachikoma";
+
+#[cfg(test)]
+mod stream_tests;
+#[cfg(test)]
+mod tool_tests;
 
 /// An explicit choice: a failed subscription request never falls back to API billing.
 #[derive(Clone)]
@@ -22,9 +34,16 @@ pub struct OpenAIChat {
     authentication: OpenAIAuthentication,
     retry: RetryConfig,
     endpoint: String,
+    tool_schema_mode: ToolSchemaMode,
 }
 
 impl OpenAIChat {
+    /// Select automatic, disabled, or explicitly required provider-side schema constraints.
+    pub fn with_tool_schema_mode(mut self, mode: ToolSchemaMode) -> Self {
+        self.tool_schema_mode = mode;
+        self
+    }
+
     pub fn with_api_key(config: OpenAIConfig, retry: RetryConfig) -> Result<Self, LLMError> {
         Self::new(config, OpenAIAuthentication::ApiKey, retry)
     }
@@ -55,6 +74,7 @@ impl OpenAIChat {
             authentication,
             retry,
             endpoint: "https://api.openai.com/v1/responses".into(),
+            tool_schema_mode: ToolSchemaMode::Auto,
         })
     }
 }
@@ -67,7 +87,9 @@ impl LLMChat for OpenAIChat {
         let model = self.config.model.as_deref().ok_or(LLMError::Configuration(
             "Set TACHIKOMA_OPENAI_MODEL to a model available to your selected account, then restart core.",
         ))?;
-        let body = request_body(model, request)?;
+        let namespace = matches!(self.authentication, OpenAIAuthentication::Subscription(_))
+            .then_some(TOOL_NAMESPACE);
+        let body = request_body(model, request, self.tool_schema_mode, namespace)?;
         let token =
             match &self.authentication {
                 OpenAIAuthentication::ApiKey => self
@@ -96,13 +118,18 @@ impl LLMChat for OpenAIChat {
                     .json(&body)
                     .send()
             },
-            read_response,
+            |response| read_response(response, namespace),
         )
         .await
     }
 }
 
-fn request_body(model: &str, request: LLMRequest<'_>) -> Result<Value, LLMError> {
+fn request_body(
+    model: &str,
+    request: LLMRequest<'_>,
+    schema_mode: ToolSchemaMode,
+    namespace: Option<&str>,
+) -> Result<Value, LLMError> {
     let mut input = Vec::new();
     for message in request.messages {
         match message {
@@ -138,23 +165,41 @@ fn request_body(model: &str, request: LLMRequest<'_>) -> Result<Value, LLMError>
         body["instructions"] = json!(request.system_prompt);
     }
     if !request.tools.is_empty() {
-        body["tools"] = Value::Array(
-            request
-                .tools
-                .iter()
-                .map(|tool| {
-                    json!({
-                        "type": "function",
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.input_schema,
-                        "strict": false,
-                    })
+        let strict = strict_tools(ToolProvider::OpenAI, model, schema_mode, request.tools);
+        let definitions: Vec<_> = request
+            .tools
+            .iter()
+            .zip(strict)
+            .map(|(tool, strict)| {
+                json!({
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                    "strict": strict,
                 })
-                .collect(),
-        );
+            })
+            .collect();
+        // ChatGPT plan usage requires function/custom tools inside a namespace.
+        // API-key connections retain their existing flat tool definitions.
+        body["tools"] = match namespace {
+            Some(name) => json!([{
+                "type": "namespace", "name": name,
+                "description": "Tools available to this agent, including its final tools.",
+                "tools": definitions,
+            }]),
+            None => Value::Array(definitions),
+        };
         body["tool_choice"] = json!("auto");
         body["parallel_tool_calls"] = json!(true);
+        tracing::debug!(
+            provider = "openai",
+            tool_choice = "auto",
+            parallel_tool_calls = true,
+            namespace,
+            tool_count = request.tools.len(),
+            "Provider tool settings"
+        );
     }
     if !request.system_prompt.is_empty()
         || !request.tools.is_empty()
@@ -166,17 +211,38 @@ fn request_body(model: &str, request: LLMRequest<'_>) -> Result<Value, LLMError>
     Ok(body)
 }
 
-async fn read_response(mut response: reqwest::Response) -> Result<LLMResponse, LLMError> {
+async fn read_response(
+    mut response: reqwest::Response,
+    namespace: Option<&str>,
+) -> Result<LLMResponse, LLMError> {
     if !response.status().is_success() {
         return Err(LLMError::Http(response.status().as_u16()));
     }
     let mut parser = ResponseStream::default();
     while let Some(chunk) = response.chunk().await.map_err(|_| LLMError::Transport)? {
-        if let Some(text) = parser.push(&chunk)? {
-            return Ok(text);
+        if let Some(response) = parser.push(&chunk)? {
+            validate_namespace(&response, namespace)?;
+            return Ok(response);
         }
     }
     Err(LLMError::IncompleteResponse)
+}
+
+fn validate_namespace(response: &LLMResponse, expected: Option<&str>) -> Result<(), LLMError> {
+    let AssistantReplay::OpenAI(items) = &response.replay else {
+        return Err(LLMError::InvalidResponse);
+    };
+    for item in items.iter().filter(|item| item["type"] == "function_call") {
+        let actual = match item.get("namespace") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(name)) => Some(name.as_str()),
+            _ => return Err(LLMError::InvalidResponse),
+        };
+        if actual != expected {
+            return Err(LLMError::InvalidResponse);
+        }
+    }
+    Ok(())
 }
 
 /// SSE is framed by blank lines, independent of HTTP chunk and UTF-8 boundaries.
@@ -186,6 +252,8 @@ struct ResponseStream {
     data: String,
     received: usize,
     previous_cr: bool,
+    announced_items: BTreeSet<u64>,
+    completed_items: BTreeMap<u64, Value>,
 }
 
 impl ResponseStream {
@@ -225,7 +293,42 @@ impl ResponseStream {
             let event: Value =
                 serde_json::from_str(&data).map_err(|_| LLMError::InvalidResponse)?;
             return match event["type"].as_str() {
-                Some("response.completed") => completed_response(&event["response"]).map(Some),
+                Some("response.completed") => self.finish_response(&event["response"]).map(Some),
+                Some("response.output_item.added") => {
+                    let index = event["output_index"]
+                        .as_u64()
+                        .ok_or(LLMError::InvalidResponse)?;
+                    if !self.announced_items.insert(index) {
+                        return Err(LLMError::InvalidResponse);
+                    }
+                    // Remember only its position to detect unfinished trailing
+                    // items. Partial arguments/reasoning are never retained.
+                    Ok(None)
+                }
+                Some("response.output_item.done") => {
+                    // Only fixed categories and counts: no replay/reasoning payloads.
+                    let item = &event["item"];
+                    let index = event["output_index"]
+                        .as_u64()
+                        .ok_or(LLMError::InvalidResponse)?;
+                    if !item.is_object() || self.completed_items.contains_key(&index) {
+                        return Err(LLMError::InvalidResponse);
+                    }
+                    let kind = match item["type"].as_str() {
+                        Some("message") => "message",
+                        Some("function_call") => "function_call",
+                        Some("reasoning") => "reasoning",
+                        _ => "other",
+                    };
+                    tracing::debug!(
+                        kind,
+                        output_index = index,
+                        content_blocks = item["content"].as_array().map(Vec::len),
+                        "Completed streamed output item"
+                    );
+                    self.completed_items.insert(index, item.clone());
+                    Ok(None)
+                }
                 Some("response.incomplete") => Err(LLMError::IncompleteResponse),
                 Some("response.failed" | "error") => Err(LLMError::ProviderFailure),
                 Some(_) => Ok(None),
@@ -239,6 +342,44 @@ impl ResponseStream {
             self.data.push_str(data.strip_prefix(' ').unwrap_or(data));
         }
         Ok(None)
+    }
+
+    fn finish_response(&mut self, response: &Value) -> Result<LLMResponse, LLMError> {
+        let output = response["output"]
+            .as_array()
+            .ok_or(LLMError::InvalidResponse)?;
+        tracing::debug!(
+            final_output_items = output.len(),
+            streamed_output_items = self.completed_items.len(),
+            "Completed provider response"
+        );
+        if output.is_empty()
+            && self
+                .announced_items
+                .iter()
+                .any(|index| !self.completed_items.contains_key(index))
+        {
+            return Err(LLMError::IncompleteResponse);
+        }
+        if !output.is_empty() || self.completed_items.is_empty() {
+            return completed_response(response);
+        }
+        // Subscription streams can finish with an empty response.output. Retain
+        // output_item.done content (including opaque reasoning) but expose no
+        // executable calls until response.completed confirms overall success.
+        // Deltas and output_item.added are deliberately never used for replay.
+        for (expected, index) in (0_u64..).zip(self.completed_items.keys()) {
+            if expected != *index {
+                return Err(LLMError::InvalidResponse);
+            }
+        }
+        let mut completed = response.clone();
+        completed["output"] = Value::Array(
+            std::mem::take(&mut self.completed_items)
+                .into_values()
+                .collect(),
+        );
+        completed_response(&completed)
     }
 }
 
@@ -679,7 +820,9 @@ mod tests {
                     system_prompt: "",
                     messages: &[LLMMessage::Assistant(AssistantReplay::Anthropic(vec![]))],
                     tools: &[],
-                }
+                },
+                ToolSchemaMode::Auto,
+                None,
             ),
             Err(LLMError::InvalidResponse)
         );

@@ -38,6 +38,7 @@ An **invocation** is one user request and all the model turns needed to handle i
 | `LLMMessage` | User text, an assistant response, or a batch of tool results. |
 | `AssistantReplay` | Original provider content retained for the next request, including opaque reasoning data. |
 | `ToolDefinition` / `ToolCall` | A tool's name, description and input schema; one requested call with an ID and arguments. |
+| `ToolSchemaMode` | Whether the provider should constrain tool arguments: `Auto` (default), `Off`, or `Required`. Local validation always runs. |
 | `ToolResult` / `ToolError` | A result matched to its call ID, or a safe diagnostic the LLM can use to correct the call. |
 | `Tool` / `AnswerTool` | A concurrent tool interface; the built-in `answer` tool validates and returns its input dictionary unchanged. |
 
@@ -231,6 +232,44 @@ including encrypted reasoning, or Anthropic content blocks, including thinking
 signatures. History belongs to its selected provider and is not converted when
 switching providers.
 
+OpenAI's parser retains complete `response.output_item.done` items. If the final
+`response.completed` event has an empty output array, those items supply the
+response in their original index order. Nothing is dispatched until the whole
+response completes successfully; partial deltas and interrupted streams cannot
+execute tools.
+
+Tool names, descriptions and original argument schemas are sent on every model
+turn. ChatGPT subscription requests group functions in the `tachikoma` namespace,
+as required by the [subscription tool contract](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
+API-key requests keep flat function definitions. Returned namespace information
+is checked before dispatch; the agent still sees the simple name `answer`.
+
+Both clients default to `ToolSchemaMode::Auto`: enable provider strict tool
+calling for a small list of known compatible models and schemas. The bundled
+Answer schema with `gpt-6-luna` qualifies. Unknown models or unsupported schemas
+use `strict: false`; DEBUG explains the choice for each numbered tool. Schema
+documents are never rewritten, and all calls are still validated locally.
+
+The automatic schema subset covers closed objects, typed arrays, primitive
+values, nullable primitives and scalar enums. OpenAI requires every property to
+be required; Anthropic also allows optional properties. More complex schemas
+(including references, composition and additional constraints) keep non-strict
+generation. The compatibility check applies conservative size limits and
+Anthropic's combined request limits. The exact model list and checks live in
+`clients/llm/{tool_schema,strict_schema}.rs`.
+
+Use `client.with_tool_schema_mode(ToolSchemaMode::Off)` to disable provider
+constraints, or `ToolSchemaMode::Required` to explicitly request strict mode for
+every tool, including models and schemas outside the automatic subset. Required
+lets the provider reject unsupported definitions; it never silently downgrades.
+Import the enum from `tachikoma_core::llm`.
+
+Strict tool calling constrains a called tool's arguments. It does **not** require
+the model to call a tool. Both clients keep automatic tool selection and permit
+parallel calls; a text-only response still yields `Unsatisfactory`. We use native
+tool schemas rather than a separate JSON response format, because completion
+requires calling a configured final tool.
+
 The existing `LLMChat::invoke(&self, prompt: &str)` remains a text-only convenience
 method. The web form uses it: each request sends one user prompt with no history or
 tools. OpenAI's stream is collected internally; both providers return a completed
@@ -240,6 +279,37 @@ exponential backoff and jitter. Transport failures and interrupted, refused or
 truncated responses are not retried. Calls never switch billing methods.
 
 ## Run
+
+To run the agent loop with your saved ChatGPT subscription:
+
+```sh
+cargo run --locked -p tachikoma-core --example basic_agent -- "<model-available-to-your-openai-account>" "What is 2 + 2?"
+```
+
+The example loads the bundled resources using the core manifest directory and
+registers only `answer`, the default final tool. It prints the model-turn count,
+final tool name and validated output dictionary. Without a task argument, it asks
+"What is 2 + 2?". An error or an unsatisfactory response exits unsuccessfully.
+The loop runs locally and sends the task to OpenAI using saved subscription
+authorization; it cannot fall back to API-key billing. Sign in through the setup
+page first if necessary, and stop the server before running the example so only
+one process uses the saved subscription registration. Model selection comes from
+the command argument; this example does not read provider environment settings.
+
+A successful run might print the following to standard output (wording can vary):
+
+```text
+Completed via answer
+{
+  "text": "4"
+}
+```
+
+If the model returns without a tool call, the example prints its actual text
+(or `<no text>`) before reporting `Unsatisfactory` and exiting with failure.
+Use `--debug` below to inspect the instructions, advertised tools and response.
+
+To run the provider setup page and its text-only prompt form:
 
 Configure the models you intend to use, then run from the workspace:
 
@@ -260,6 +330,54 @@ page. API usage is billed separately from a ChatGPT or Claude subscription.
 For OpenAI subscription access, choose **OpenAI — ChatGPT subscription** and
 **Continue with ChatGPT**. The browser completes OpenAI's native authorization
 flow and returns to core. An available API key is never used as a fallback.
+
+## Logging
+
+Core emits structured events with `tracing`. The server and `basic_agent` example
+install `tracing-subscriber` to print INFO, WARN and ERROR events to standard error.
+The final answer remains on standard output. Logging is enabled automatically at
+INFO; both executables filter out other dependencies' logs.
+
+The example reports resource loading and credential restoration. Agent events
+report initialization, invocation start, model requests and responses, tool
+execution, rejected calls, completion and turn-limit failures. Each invocation has
+a generated ID; concurrent tools have their own spans (groups of related events).
+Events include turn numbers, counts, registered tool names and elapsed milliseconds.
+HTTP retries report the status, next attempt and wait duration.
+
+To display prompts, tool definitions and model answers, put `--debug` before the model:
+
+```sh
+cargo run --locked -p tachikoma-core --example basic_agent -- --debug "gpt-6-luna" "What is 2+2"
+```
+
+DEBUG prints the effective system prompt (including the shared prefix and final
+tool list), each new user input, and each available tool's name, description,
+argument schema and final-tool status. It also prints each completed model
+response's text and tool calls with their arguments. This includes answers returned through `answer`, even
+when the model supplies no separate text. Malformed argument JSON is shown as
+`<invalid JSON>` because the adapters do not retain the original malformed text.
+These conversation fields are displayed without redaction.
+DEBUG also includes the example's model/connection, individual HTTP attempts,
+provider tool settings (including OpenAI's namespace), and the strict-schema
+decision for each tool index. OpenAI logs completed output-item categories and
+counts to distinguish an empty response from output carried by earlier stream
+events, without printing opaque replay content. This is an explicit command option, independent of
+Cargo's debug/release build profile.
+
+INFO and higher levels omit conversation content. Authentication headers, stored
+credentials, opaque provider replay/reasoning, provider call IDs and
+tool-result payloads are not added to diagnostic events at any level. Retained
+history is not dumped; new prompts
+and responses are logged as the invocation proceeds. The final answer is still
+printed explicitly as the example's result on standard output.
+
+The library does not install a global subscriber. Applications embedding core
+choose their own subscriber, filtering and output destination. Enabling DEBUG for
+`tachikoma_core` also enables content events; these use the separate
+`tachikoma_core::agent::content` target, which callers can turn off while retaining
+DEBUG timing/retry events. Core does not create log files. Tests capture events
+from a fake model and tools to check default privacy and explicit DEBUG content.
 
 ## Configuration
 
@@ -314,6 +432,7 @@ retries remain disabled to avoid multiplying attempts.
 - `llm/retry.rs`: BackON retry policy, `Retry-After` parsing and shared HTTP deadline.
 - `clients/llm/openai_client.rs`: explicit OpenAI authentication choice and Responses SSE parsing.
 - `clients/llm/anthropic_client.rs`: Anthropic message/tool encoding and response parsing.
+- `clients/llm/{tool_schema,strict_schema}.rs`: strict-mode selection and conservative schema compatibility checks without rewriting schemas.
 - `auth.rs`: OpenAI OAuth, token validation, refresh, persistence and disconnect.
 - `web.rs`: local setup/status/login/invoke routes and browser request protection.
 - `web/`: small HTML/CSS/JavaScript interface; model output is rendered as text.

@@ -5,8 +5,10 @@ use crate::common::config::{AnthropicConfig, RetryConfig};
 
 use crate::llm::{
     AssistantReplay, LLMChat, LLMError, LLMMessage, LLMRequest, LLMResponse, ToolArguments,
-    ToolCall, http_client, read_limited, request_with_retry,
+    ToolCall, ToolSchemaMode, http_client, read_limited, request_with_retry,
 };
+
+use super::tool_schema::{ToolProvider, strict_tools};
 
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 
@@ -16,6 +18,7 @@ pub struct AnthropicChat {
     config: AnthropicConfig,
     retry: RetryConfig,
     endpoint: String,
+    tool_schema_mode: ToolSchemaMode,
 }
 
 impl AnthropicChat {
@@ -25,7 +28,16 @@ impl AnthropicChat {
             config,
             retry,
             endpoint: MESSAGES_URL.to_owned(),
+            tool_schema_mode: ToolSchemaMode::Auto,
         })
+    }
+
+    /// Choose strict tool schemas without changing their definitions. Auto uses
+    /// known compatible models and schemas; Required lets the provider validate
+    /// support and never silently falls back to non-strict mode.
+    pub fn with_tool_schema_mode(mut self, mode: ToolSchemaMode) -> Self {
+        self.tool_schema_mode = mode;
+        self
     }
 }
 
@@ -61,21 +73,34 @@ impl LLMChat for AnthropicChat {
             body["system"] = json!(request.system_prompt);
         }
         if !request.tools.is_empty() {
+            let strict = strict_tools(
+                ToolProvider::Anthropic,
+                model,
+                self.tool_schema_mode,
+                request.tools,
+            );
             body["tools"] = Value::Array(
                 request
                     .tools
                     .iter()
-                    .map(|tool| {
+                    .zip(strict)
+                    .map(|(tool, strict)| {
                         json!({
                             "name": tool.name,
                             "description": tool.description,
                             "input_schema": tool.input_schema,
-                            "strict": false,
+                            "strict": strict,
                         })
                     })
                     .collect(),
             );
             body["tool_choice"] = json!({"type": "auto", "disable_parallel_tool_use": false});
+            tracing::debug!(
+                provider = "anthropic",
+                tool_choice = "auto",
+                parallel_tool_calls = true,
+                "Configured provider tool calling"
+            );
         }
 
         request_with_retry(
@@ -349,12 +374,14 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let mut chat = AnthropicChat::new(config(), retry_config()).unwrap();
+        let mut config = config();
+        config.model = Some("claude-haiku-4-5".into());
+        let mut chat = AnthropicChat::new(config, retry_config()).unwrap();
         chat.endpoint = format!("http://{address}/v1/messages");
         let tools = [ToolDefinition {
             name: "lookup".to_owned(),
             description: "Look up a value".to_owned(),
-            input_schema: json!({"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}),
+            input_schema: json!({"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"], "additionalProperties": false}),
         }];
         let mut history = vec![LLMMessage::User("Find both values.".to_owned())];
         let first = chat
@@ -398,20 +425,22 @@ mod tests {
 
         let requests = captured.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0]["system"], "Use the provided tools.");
-        assert_eq!(
-            requests[0]["tools"],
-            json!([{
-                "name": "lookup",
-                "description": "Look up a value",
-                "input_schema": tools[0].input_schema,
-                "strict": false,
-            }])
-        );
-        assert_eq!(
-            requests[0]["tool_choice"],
-            json!({"type": "auto", "disable_parallel_tool_use": false})
-        );
+        for request in requests.iter() {
+            assert_eq!(request["system"], "Use the provided tools.");
+            assert_eq!(
+                request["tools"],
+                json!([{
+                    "name": "lookup",
+                    "description": "Look up a value",
+                    "input_schema": tools[0].input_schema,
+                    "strict": true,
+                }])
+            );
+            assert_eq!(
+                request["tool_choice"],
+                json!({"type": "auto", "disable_parallel_tool_use": false})
+            );
+        }
         assert_eq!(
             requests[1]["messages"],
             json!([
@@ -423,6 +452,52 @@ mod tests {
                     {"type": "text", "text": "Continue with these results."},
                 ]},
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn required_schema_mode_never_downgrades_a_provider_rejection() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let capture = captured.clone();
+        let router = Router::new().route(
+            "/v1/messages",
+            post(move |Json(body): Json<Value>| {
+                capture.lock().unwrap().push(body);
+                async { StatusCode::BAD_REQUEST }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut chat = AnthropicChat::new(config(), retry_config())
+            .unwrap()
+            .with_tool_schema_mode(ToolSchemaMode::Required);
+        chat.endpoint = format!("http://{address}/v1/messages");
+        // Both the test model and this open dictionary are outside Auto's subset.
+        let tools = [ToolDefinition {
+            name: "answer".into(),
+            description: "Return the answer.".into(),
+            input_schema: json!({"type": "object"}),
+        }];
+        let result = chat
+            .complete(LLMRequest {
+                system_prompt: "Use answer to finish.",
+                messages: &[LLMMessage::User("What is 2 + 2?".into())],
+                tools: &tools,
+            })
+            .await;
+        server.abort();
+        assert_eq!(result, Err(LLMError::Http(400)));
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]["tools"],
+            json!([{
+                "name": "answer",
+                "description": "Return the answer.",
+                "input_schema": tools[0].input_schema,
+                "strict": true
+            }])
         );
     }
 

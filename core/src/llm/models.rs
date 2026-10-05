@@ -8,6 +8,18 @@ use super::LLMError;
 
 pub type ConversationHistory = Vec<LLMMessage>;
 
+/// Provider-side tool argument constraints; local validation remains authoritative.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ToolSchemaMode {
+    /// Use strict mode for known models and an unchanged, conservatively supported schema.
+    #[default]
+    Auto,
+    /// Preserve best-effort provider generation and validate arguments locally.
+    Off,
+    /// Request strict mode explicitly, returning provider errors instead of downgrading.
+    Required,
+}
+
 #[derive(Clone, PartialEq)]
 pub enum LLMMessage {
     User(String),
@@ -109,7 +121,7 @@ impl fmt::Display for ToolError {
 
 impl std::error::Error for ToolError {}
 
-// Diagnostics never reveal prompts, tool payloads, schemas, or provider reasoning.
+// Debug formatting stays redacted even when content tracing is explicitly enabled.
 macro_rules! redacted_debug {
     ($($ty:ty),+ $(,)?) => {$ (
         impl fmt::Debug for $ty {

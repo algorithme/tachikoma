@@ -93,6 +93,12 @@ impl<L: LLMChat> ConfigurableAgent<L> {
             prompt,
         )
         .into();
+        tracing::info!(
+            tool_count = definitions.len(),
+            final_tool_count = terminal_tools.len(),
+            max_turns = config.max_turns,
+            "Agent initialized"
+        );
         Ok(Self {
             llm,
             system_prompt,
