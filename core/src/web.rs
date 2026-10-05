@@ -15,9 +15,10 @@ use uuid::Uuid;
 
 use crate::{
     auth::{AuthError, OpenAISubscription},
+    clients::llm::anthropic_client::AnthropicChat,
     clients::llm::openai_client::{OpenAIAuthentication, OpenAIChat},
     common::config::{LLMProviderConfig, OpenAIAuthMode, ProviderKind},
-    llm::{LLMChat, LLMError, anthropic::AnthropicChat},
+    llm::{LLMChat, LLMError},
 };
 
 struct AppState {

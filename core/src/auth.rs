@@ -120,7 +120,7 @@ pub(crate) struct SubscriptionStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AuthError {
+pub enum AuthError {
     StorageUnavailable,
     InvalidCallback,
     ExpiredLogin,

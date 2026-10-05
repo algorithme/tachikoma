@@ -1,31 +1,18 @@
-use std::io;
-
-use tokio::net::TcpListener;
-
-use common::config::Config;
-
-mod auth;
-mod clients;
-mod common;
-mod llm;
-mod web;
+use tracing_subscriber::prelude::*;
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
-    let config = Config::from_env()?;
-    let address = config.bind_addr();
-    let listener = TcpListener::bind(address).await.map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("Could not bind http://{address}/: {error}"),
+async fn main() -> std::io::Result<()> {
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::filter::Targets::new()
+                .with_target("tachikoma_core", tracing::Level::INFO),
         )
-    })?;
-
-    println!(
-        "Tachikoma core listening on http://{}/",
-        listener.local_addr()?
-    );
-
-    let address = listener.local_addr()?;
-    axum::serve(listener, web::build_router(config.llm, address)).await
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_target(false)
+                .with_ansi(false),
+        )
+        .init();
+    tachikoma_core::serve().await
 }

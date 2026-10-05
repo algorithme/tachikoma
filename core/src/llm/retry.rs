@@ -17,24 +17,37 @@ use crate::common::config::RetryConfig;
 use super::LLMError;
 
 struct AttemptError {
+    attempt: u64,
     error: LLMError,
     retry_after: Option<Duration>,
 }
 
 /// One deadline covers all HTTP attempts, backoff waits, and response reading.
-pub(crate) async fn request_with_retry<F, Fut, R, ReadFut>(
+pub(crate) async fn request_with_retry<F, Fut, R, ReadFut, T>(
     config: RetryConfig,
     mut send: F,
     read: R,
-) -> Result<String, LLMError>
+) -> Result<T, LLMError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<Response, reqwest::Error>>,
     R: FnOnce(Response) -> ReadFut,
-    ReadFut: Future<Output = Result<String, LLMError>>,
+    ReadFut: Future<Output = Result<T, LLMError>>,
 {
-    let deadline = Instant::now() + config.timeout;
-    timeout_at(deadline, async {
+    if !config.is_valid() {
+        return Err(LLMError::Configuration(
+            "Retry delays must be positive and ordered within a timeout of at most one hour.",
+        ));
+    }
+    let started = Instant::now();
+    let deadline = started + config.timeout;
+    let mut attempts = 0_u64;
+    tracing::debug!(
+        max_retries = config.max_retries,
+        timeout_ms = config.timeout.as_secs_f64() * 1000.0,
+        "Starting provider request"
+    );
+    let result = timeout_at(deadline, async {
         let backoff = ExponentialBuilder::default()
             .with_min_delay(config.initial_delay)
             .with_max_delay(config.max_delay)
@@ -42,21 +55,42 @@ where
             .with_jitter();
 
         let response = (|| {
+            attempts += 1;
+            let attempt_number = attempts;
+            let attempt_started = Instant::now();
+            tracing::debug!(attempt = attempt_number, "Starting provider HTTP attempt");
             let attempt = send();
             async move {
-                let response = attempt.await.map_err(|error| AttemptError {
-                    error: if error.is_timeout() {
-                        LLMError::Timeout
-                    } else {
-                        LLMError::Transport
-                    },
-                    retry_after: None,
+                let response = attempt.await.map_err(|error| {
+                    let timed_out = error.is_timeout();
+                    tracing::debug!(
+                        attempt = attempt_number,
+                        error_kind = if timed_out { "timeout" } else { "transport" },
+                        elapsed_ms = attempt_started.elapsed().as_secs_f64() * 1000.0,
+                        "Provider HTTP attempt failed"
+                    );
+                    AttemptError {
+                        attempt: attempt_number,
+                        error: if timed_out {
+                            LLMError::Timeout
+                        } else {
+                            LLMError::Transport
+                        },
+                        retry_after: None,
+                    }
                 })?;
+                tracing::debug!(
+                    attempt = attempt_number,
+                    status = response.status().as_u16(),
+                    elapsed_ms = attempt_started.elapsed().as_secs_f64() * 1000.0,
+                    "Received provider HTTP response"
+                );
                 if response.status().is_success() {
                     Ok(response)
                 } else {
                     // Keep only status and retry timing, never the provider body or raw diagnostics.
                     Err(AttemptError {
+                        attempt: attempt_number,
                         error: LLMError::Http(response.status().as_u16()),
                         retry_after: retry_after(response.headers(), SystemTime::now()),
                     })
@@ -68,19 +102,48 @@ where
         .adjust(|error, delay| {
             // `None` means the retry count is exhausted; a header must not revive it.
             // BackON adds jitter after its cap, so cap that result before honoring the server.
-            let delay = delay?
+            let Some(delay) = delay else {
+                tracing::debug!(attempts = error.attempt, "Provider retry limit reached");
+                return None;
+            };
+            let delay = delay
                 .min(config.max_delay)
                 .max(error.retry_after.unwrap_or_default());
             // A server delay may exceed our backoff cap. Never retry earlier to fit the deadline.
-            (delay < deadline.saturating_duration_since(Instant::now())).then_some(delay)
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if delay >= remaining {
+                tracing::debug!(
+                    attempts = error.attempt,
+                    delay_ms = delay.as_secs_f64() * 1000.0,
+                    remaining_ms = remaining.as_secs_f64() * 1000.0,
+                    "Provider retry wait exceeds remaining deadline"
+                );
+                return None;
+            }
+            if let LLMError::Http(status) = error.error {
+                tracing::info!(
+                    next_attempt = error.attempt + 1,
+                    status,
+                    delay_ms = delay.as_secs_f64() * 1000.0,
+                    "Waiting before retrying provider request"
+                );
+            }
+            Some(delay)
         })
         .await
         .map_err(|error| error.error)?;
 
         read(response).await
     })
-    .await
-    .map_err(|_| LLMError::Timeout)?
+    .await;
+    tracing::debug!(
+        attempts,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        succeeded = matches!(&result, Ok(Ok(_))),
+        deadline_exceeded = result.is_err(),
+        "Provider request finished"
+    );
+    result.map_err(|_| LLMError::Timeout)?
 }
 
 fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
@@ -121,6 +184,37 @@ mod tests {
 
     async fn read_ok(_: Response) -> Result<String, LLMError> {
         Ok("completed".into())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invalid_library_retry_settings_fail_before_sending() {
+        for config in [
+            RetryConfig {
+                initial_delay: Duration::ZERO,
+                ..config(2)
+            },
+            RetryConfig {
+                max_delay: Duration::from_secs(31),
+                ..config(2)
+            },
+            RetryConfig {
+                timeout: Duration::from_secs(3601),
+                ..config(2)
+            },
+        ] {
+            let attempts = Cell::new(0);
+            let result = request_with_retry(
+                config,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    ready(Ok(response(200, None)))
+                },
+                read_ok,
+            )
+            .await;
+            assert!(matches!(result, Err(LLMError::Configuration(_))));
+            assert_eq!(attempts.get(), 0);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -221,7 +315,7 @@ mod tests {
                 attempts.set(attempts.get() + 1);
                 ready(Ok(response(200, None)))
             },
-            |_| ready(Err(LLMError::IncompleteResponse)),
+            |_| ready(Err::<String, _>(LLMError::IncompleteResponse)),
         )
         .await;
         assert_eq!(result, Err(LLMError::IncompleteResponse));
@@ -246,7 +340,7 @@ mod tests {
                     Ok(response(status, Some("1")))
                 }
             },
-            |_| pending(),
+            |_| pending::<Result<String, LLMError>>(),
         )
         .await;
         assert_eq!(result, Err(LLMError::Timeout));

@@ -1,10 +1,25 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde_json::{Value, json};
 
 use crate::{
     auth::OpenAISubscription,
     common::config::{OpenAIConfig, RetryConfig},
-    llm::{LLMChat, LLMError, MAX_RESPONSE_BYTES, http_client, request_with_retry},
+    llm::{
+        AssistantReplay, LLMChat, LLMError, LLMMessage, LLMRequest, LLMResponse,
+        MAX_RESPONSE_BYTES, ToolArguments, ToolCall, ToolSchemaMode, http_client,
+        request_with_retry,
+    },
 };
+
+use super::tool_schema::{ToolProvider, strict_tools};
+
+const TOOL_NAMESPACE: &str = "tachikoma";
+
+#[cfg(test)]
+mod stream_tests;
+#[cfg(test)]
+mod tool_tests;
 
 /// An explicit choice: a failed subscription request never falls back to API billing.
 #[derive(Clone)]
@@ -13,15 +28,41 @@ pub(crate) enum OpenAIAuthentication {
     Subscription(OpenAISubscription),
 }
 
-pub(crate) struct OpenAIChat {
+pub struct OpenAIChat {
     client: reqwest::Client,
     config: OpenAIConfig,
     authentication: OpenAIAuthentication,
     retry: RetryConfig,
     endpoint: String,
+    tool_schema_mode: ToolSchemaMode,
 }
 
 impl OpenAIChat {
+    /// Select automatic, disabled, or explicitly required provider-side schema constraints.
+    pub fn with_tool_schema_mode(mut self, mode: ToolSchemaMode) -> Self {
+        self.tool_schema_mode = mode;
+        self
+    }
+
+    pub fn with_api_key(config: OpenAIConfig, retry: RetryConfig) -> Result<Self, LLMError> {
+        Self::new(config, OpenAIAuthentication::ApiKey, retry)
+    }
+
+    /// Restore subscription credentials from the OS credential store only.
+    pub async fn with_subscription(
+        config: OpenAIConfig,
+        retry: RetryConfig,
+    ) -> Result<Self, LLMError> {
+        let subscription = OpenAISubscription::restore()
+            .await
+            .map_err(LLMError::Authentication)?;
+        Self::new(
+            config,
+            OpenAIAuthentication::Subscription(subscription),
+            retry,
+        )
+    }
+
     pub(crate) fn new(
         config: OpenAIConfig,
         authentication: OpenAIAuthentication,
@@ -33,18 +74,22 @@ impl OpenAIChat {
             authentication,
             retry,
             endpoint: "https://api.openai.com/v1/responses".into(),
+            tool_schema_mode: ToolSchemaMode::Auto,
         })
     }
 }
 
 impl LLMChat for OpenAIChat {
-    async fn invoke(&self, prompt: &str) -> Result<String, LLMError> {
-        if prompt.trim().is_empty() {
+    async fn complete(&self, request: LLMRequest<'_>) -> Result<LLMResponse, LLMError> {
+        if request.messages.is_empty() {
             return Err(LLMError::InvalidPrompt);
         }
         let model = self.config.model.as_deref().ok_or(LLMError::Configuration(
             "Set TACHIKOMA_OPENAI_MODEL to a model available to your selected account, then restart core.",
         ))?;
+        let namespace = matches!(self.authentication, OpenAIAuthentication::Subscription(_))
+            .then_some(TOOL_NAMESPACE);
+        let body = request_body(model, request, self.tool_schema_mode, namespace)?;
         let token =
             match &self.authentication {
                 OpenAIAuthentication::ApiKey => self
@@ -62,7 +107,7 @@ impl LLMChat for OpenAIChat {
                     .map_err(LLMError::Authentication)?,
             };
 
-        // The common subset works for API keys and subscription OAuth. No conversation is stored.
+        // History is supplied by the caller; provider-side conversation storage remains disabled.
         request_with_retry(
             self.retry,
             || {
@@ -70,31 +115,134 @@ impl LLMChat for OpenAIChat {
                     .post(&self.endpoint)
                     .bearer_auth(&token)
                     .header(reqwest::header::ACCEPT, "text/event-stream")
-                    .json(&json!({
-                        "model": model,
-                        "input": [{"role": "user", "content": prompt}],
-                        "store": false,
-                        "stream": true,
-                    }))
+                    .json(&body)
                     .send()
             },
-            read_response,
+            |response| read_response(response, namespace),
         )
         .await
     }
 }
 
-async fn read_response(mut response: reqwest::Response) -> Result<String, LLMError> {
+fn request_body(
+    model: &str,
+    request: LLMRequest<'_>,
+    schema_mode: ToolSchemaMode,
+    namespace: Option<&str>,
+) -> Result<Value, LLMError> {
+    let mut input = Vec::new();
+    for message in request.messages {
+        match message {
+            LLMMessage::User(text) => input.push(json!({"role": "user", "content": text})),
+            LLMMessage::Assistant(AssistantReplay::OpenAI(items)) => {
+                input.extend(items.iter().cloned());
+            }
+            LLMMessage::Assistant(AssistantReplay::Anthropic(_)) => {
+                return Err(LLMError::InvalidResponse);
+            }
+            LLMMessage::ToolResults(results) => {
+                for result in results {
+                    let output = match &result.outcome {
+                        Ok(value) => value.to_string(),
+                        Err(error) => json!({"error": error.to_string()}).to_string(),
+                    };
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": result.call_id,
+                        "output": output,
+                    }));
+                }
+            }
+        }
+    }
+    let mut body = json!({
+        "model": model,
+        "input": input,
+        "store": false,
+        "stream": true,
+    });
+    if !request.system_prompt.is_empty() {
+        body["instructions"] = json!(request.system_prompt);
+    }
+    if !request.tools.is_empty() {
+        let strict = strict_tools(ToolProvider::OpenAI, model, schema_mode, request.tools);
+        let definitions: Vec<_> = request
+            .tools
+            .iter()
+            .zip(strict)
+            .map(|(tool, strict)| {
+                json!({
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                    "strict": strict,
+                })
+            })
+            .collect();
+        // ChatGPT plan usage requires function/custom tools inside a namespace.
+        // API-key connections retain their existing flat tool definitions.
+        body["tools"] = match namespace {
+            Some(name) => json!([{
+                "type": "namespace", "name": name,
+                "description": "Tools available to this agent, including its final tools.",
+                "tools": definitions,
+            }]),
+            None => Value::Array(definitions),
+        };
+        body["tool_choice"] = json!("auto");
+        body["parallel_tool_calls"] = json!(true);
+        tracing::debug!(
+            provider = "openai",
+            tool_choice = "auto",
+            parallel_tool_calls = true,
+            namespace,
+            tool_count = request.tools.len(),
+            "Provider tool settings"
+        );
+    }
+    if !request.system_prompt.is_empty()
+        || !request.tools.is_empty()
+        || !matches!(request.messages, [LLMMessage::User(_)])
+    {
+        // Retain opaque reasoning items so later stateless requests can replay them.
+        body["include"] = json!(["reasoning.encrypted_content"]);
+    }
+    Ok(body)
+}
+
+async fn read_response(
+    mut response: reqwest::Response,
+    namespace: Option<&str>,
+) -> Result<LLMResponse, LLMError> {
     if !response.status().is_success() {
         return Err(LLMError::Http(response.status().as_u16()));
     }
     let mut parser = ResponseStream::default();
     while let Some(chunk) = response.chunk().await.map_err(|_| LLMError::Transport)? {
-        if let Some(text) = parser.push(&chunk)? {
-            return Ok(text);
+        if let Some(response) = parser.push(&chunk)? {
+            validate_namespace(&response, namespace)?;
+            return Ok(response);
         }
     }
     Err(LLMError::IncompleteResponse)
+}
+
+fn validate_namespace(response: &LLMResponse, expected: Option<&str>) -> Result<(), LLMError> {
+    let AssistantReplay::OpenAI(items) = &response.replay else {
+        return Err(LLMError::InvalidResponse);
+    };
+    for item in items.iter().filter(|item| item["type"] == "function_call") {
+        let actual = match item.get("namespace") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(name)) => Some(name.as_str()),
+            _ => return Err(LLMError::InvalidResponse),
+        };
+        if actual != expected {
+            return Err(LLMError::InvalidResponse);
+        }
+    }
+    Ok(())
 }
 
 /// SSE is framed by blank lines, independent of HTTP chunk and UTF-8 boundaries.
@@ -104,10 +252,12 @@ struct ResponseStream {
     data: String,
     received: usize,
     previous_cr: bool,
+    announced_items: BTreeSet<u64>,
+    completed_items: BTreeMap<u64, Value>,
 }
 
 impl ResponseStream {
-    fn push(&mut self, bytes: &[u8]) -> Result<Option<String>, LLMError> {
+    fn push(&mut self, bytes: &[u8]) -> Result<Option<LLMResponse>, LLMError> {
         self.received = self.received.saturating_add(bytes.len());
         if self.received > MAX_RESPONSE_BYTES {
             return Err(LLMError::ResponseTooLarge);
@@ -129,7 +279,7 @@ impl ResponseStream {
         Ok(None)
     }
 
-    fn finish_line(&mut self) -> Result<Option<String>, LLMError> {
+    fn finish_line(&mut self) -> Result<Option<LLMResponse>, LLMError> {
         let line = String::from_utf8(std::mem::take(&mut self.line))
             .map_err(|_| LLMError::InvalidResponse)?;
         if line.is_empty() {
@@ -143,7 +293,42 @@ impl ResponseStream {
             let event: Value =
                 serde_json::from_str(&data).map_err(|_| LLMError::InvalidResponse)?;
             return match event["type"].as_str() {
-                Some("response.completed") => completed_text(&event["response"]).map(Some),
+                Some("response.completed") => self.finish_response(&event["response"]).map(Some),
+                Some("response.output_item.added") => {
+                    let index = event["output_index"]
+                        .as_u64()
+                        .ok_or(LLMError::InvalidResponse)?;
+                    if !self.announced_items.insert(index) {
+                        return Err(LLMError::InvalidResponse);
+                    }
+                    // Remember only its position to detect unfinished trailing
+                    // items. Partial arguments/reasoning are never retained.
+                    Ok(None)
+                }
+                Some("response.output_item.done") => {
+                    // Only fixed categories and counts: no replay/reasoning payloads.
+                    let item = &event["item"];
+                    let index = event["output_index"]
+                        .as_u64()
+                        .ok_or(LLMError::InvalidResponse)?;
+                    if !item.is_object() || self.completed_items.contains_key(&index) {
+                        return Err(LLMError::InvalidResponse);
+                    }
+                    let kind = match item["type"].as_str() {
+                        Some("message") => "message",
+                        Some("function_call") => "function_call",
+                        Some("reasoning") => "reasoning",
+                        _ => "other",
+                    };
+                    tracing::debug!(
+                        kind,
+                        output_index = index,
+                        content_blocks = item["content"].as_array().map(Vec::len),
+                        "Completed streamed output item"
+                    );
+                    self.completed_items.insert(index, item.clone());
+                    Ok(None)
+                }
                 Some("response.incomplete") => Err(LLMError::IncompleteResponse),
                 Some("response.failed" | "error") => Err(LLMError::ProviderFailure),
                 Some(_) => Ok(None),
@@ -158,9 +343,47 @@ impl ResponseStream {
         }
         Ok(None)
     }
+
+    fn finish_response(&mut self, response: &Value) -> Result<LLMResponse, LLMError> {
+        let output = response["output"]
+            .as_array()
+            .ok_or(LLMError::InvalidResponse)?;
+        tracing::debug!(
+            final_output_items = output.len(),
+            streamed_output_items = self.completed_items.len(),
+            "Completed provider response"
+        );
+        if output.is_empty()
+            && self
+                .announced_items
+                .iter()
+                .any(|index| !self.completed_items.contains_key(index))
+        {
+            return Err(LLMError::IncompleteResponse);
+        }
+        if !output.is_empty() || self.completed_items.is_empty() {
+            return completed_response(response);
+        }
+        // Subscription streams can finish with an empty response.output. Retain
+        // output_item.done content (including opaque reasoning) but expose no
+        // executable calls until response.completed confirms overall success.
+        // Deltas and output_item.added are deliberately never used for replay.
+        for (expected, index) in (0_u64..).zip(self.completed_items.keys()) {
+            if expected != *index {
+                return Err(LLMError::InvalidResponse);
+            }
+        }
+        let mut completed = response.clone();
+        completed["output"] = Value::Array(
+            std::mem::take(&mut self.completed_items)
+                .into_values()
+                .collect(),
+        );
+        completed_response(&completed)
+    }
 }
 
-fn completed_text(response: &Value) -> Result<String, LLMError> {
+fn completed_response(response: &Value) -> Result<LLMResponse, LLMError> {
     if response["status"] != "completed" {
         return Err(LLMError::IncompleteResponse);
     }
@@ -168,9 +391,35 @@ fn completed_text(response: &Value) -> Result<String, LLMError> {
         .as_array()
         .ok_or(LLMError::InvalidResponse)?;
     let mut text = String::new();
+    let mut tool_calls = Vec::new();
     for item in output {
         match item["type"].as_str() {
             Some("reasoning") => continue,
+            Some("function_call") => {
+                if item
+                    .get("status")
+                    .is_some_and(|status| status != "completed")
+                {
+                    return Err(LLMError::IncompleteResponse);
+                }
+                let id = item["call_id"].as_str().ok_or(LLMError::InvalidResponse)?;
+                let name = item["name"].as_str().ok_or(LLMError::InvalidResponse)?;
+                if name.trim().is_empty() {
+                    return Err(LLMError::InvalidResponse);
+                }
+                let arguments = item["arguments"]
+                    .as_str()
+                    .ok_or(LLMError::InvalidResponse)?;
+                tool_calls.push(ToolCall {
+                    id: id.into(),
+                    name: name.into(),
+                    arguments: match serde_json::from_str(arguments) {
+                        Ok(value) => ToolArguments::Json(value),
+                        Err(_) => ToolArguments::InvalidJson,
+                    },
+                });
+                continue;
+            }
             Some("message") if item["role"] == "assistant" && item["status"] == "completed" => {}
             _ => return Err(LLMError::InvalidResponse),
         }
@@ -187,11 +436,13 @@ fn completed_text(response: &Value) -> Result<String, LLMError> {
             }
         }
     }
-    if text.is_empty() {
-        Err(LLMError::InvalidResponse)
-    } else {
-        Ok(text)
-    }
+    let response = LLMResponse {
+        text: (!text.is_empty()).then_some(text),
+        tool_calls,
+        replay: AssistantReplay::OpenAI(output.clone()),
+    };
+    response.validate_call_ids()?;
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -205,7 +456,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::common::config::SecretString;
+    use crate::{
+        common::config::SecretString,
+        llm::{ToolDefinition, ToolResult},
+    };
     use axum::{
         Json, Router,
         http::{HeaderMap, StatusCode},
@@ -320,7 +574,10 @@ mod tests {
                     result = Some(text);
                 }
             }
-            assert_eq!(result.as_deref(), Some("Grüezi"));
+            assert_eq!(
+                result.and_then(|response| response.text).as_deref(),
+                Some("Grüezi")
+            );
         }
         for (kind, error) in [
             ("response.failed", LLMError::ProviderFailure),
@@ -393,17 +650,223 @@ mod tests {
     #[test]
     fn final_response_rejects_refusal_and_unrequested_tools() {
         assert_eq!(
-            completed_text(&json!({"status":"completed", "output":[{
+            completed_response(&json!({"status":"completed", "output":[{
                 "type":"message", "role":"assistant", "status":"completed",
                 "content":[{"type":"refusal", "refusal":"Cannot answer"}]
             }]})),
             Err(LLMError::Refused)
         );
         assert_eq!(
-            completed_text(&json!({"status":"completed", "output":[{
+            completed_response(&json!({"status":"completed", "output":[{
                 "type":"function_call", "name":"unexpected"
             }]})),
             Err(LLMError::InvalidResponse)
         );
+    }
+
+    #[tokio::test]
+    async fn complete_replays_tool_calls_and_reasoning_with_local_history() {
+        let output = json!([
+            {"id":"reasoning-1", "type":"reasoning", "summary":[], "encrypted_content":"opaque-test"},
+            {"id":"function-1", "type":"function_call", "status":"completed",
+             "call_id":"call-1", "name":"lookup", "arguments":"{\"query\":\"hello\"}"}
+        ]);
+        let schema = json!({
+            "type":"object", "properties":{"query":{"type":"string"}}, "required":["query"]
+        });
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let requests = attempts.clone();
+        let expected_output = output.clone();
+        let expected_schema = schema.clone();
+        let app = Router::new().route(
+            "/responses",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let attempt = requests.fetch_add(1, Ordering::SeqCst);
+                let output = expected_output.clone();
+                let schema = expected_schema.clone();
+                async move {
+                    assert_eq!(headers["authorization"], "Bearer fake-test-key");
+                    assert_eq!(body["store"], false);
+                    assert_eq!(body["stream"], true);
+                    assert_eq!(body["instructions"], "Use tools when useful.");
+                    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+                    assert_eq!(body["tool_choice"], "auto");
+                    assert_eq!(body["parallel_tool_calls"], true);
+                    assert_eq!(body["tools"], json!([{
+                        "type":"function", "name":"lookup", "description":"Look up a value.",
+                        "parameters":schema, "strict":false
+                    }]));
+                    if attempt == 0 {
+                        assert_eq!(body["input"], json!([{"role":"user", "content":"Hello"}]));
+                        format!("data: {}\n\n", json!({
+                            "type":"response.completed",
+                            "response":{"status":"completed", "output":output}
+                        }))
+                    } else {
+                        assert_eq!(attempt, 1);
+                        assert_eq!(body["input"], json!([
+                            {"role":"user", "content":"Hello"},
+                            output[0], output[1],
+                            {"type":"function_call_output", "call_id":"call-1", "output":"{\"found\":true}"}
+                        ]));
+                        completed("Found it")
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut provider = OpenAIChat::new(
+            OpenAIConfig {
+                model: Some("test-model".into()),
+                preferred_auth: None,
+                api_key: Some(SecretString::new("fake-test-key").unwrap()),
+            },
+            OpenAIAuthentication::ApiKey,
+            retry_config(),
+        )
+        .unwrap();
+        provider.endpoint = format!("http://{address}/responses");
+        let tools = [ToolDefinition {
+            name: "lookup".into(),
+            description: "Look up a value.".into(),
+            input_schema: schema,
+        }];
+        let mut history = vec![LLMMessage::User("Hello".into())];
+        let first = provider
+            .complete(LLMRequest {
+                system_prompt: "Use tools when useful.",
+                messages: &history,
+                tools: &tools,
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.text, None);
+        assert_eq!(
+            first.tool_calls,
+            vec![ToolCall {
+                id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: ToolArguments::Json(json!({"query":"hello"})),
+            }]
+        );
+        assert_eq!(
+            first.replay,
+            AssistantReplay::OpenAI(output.as_array().unwrap().clone())
+        );
+        history.push(LLMMessage::Assistant(first.replay));
+        history.push(LLMMessage::ToolResults(vec![ToolResult {
+            call_id: "call-1".into(),
+            outcome: Ok(json!({"found":true})),
+        }]));
+        let second = provider
+            .complete(LLMRequest {
+                system_prompt: "Use tools when useful.",
+                messages: &history,
+                tools: &tools,
+            })
+            .await;
+        server.abort();
+        assert_eq!(second.unwrap().into_text(), Ok("Found it".into()));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn tool_arguments_can_be_invalid_but_tool_identity_must_be_valid() {
+        let call = json!({
+            "type":"function_call", "status":"completed", "id":"function-1",
+            "call_id":"call-1", "name":"answer", "arguments":"{private-invalid-json"
+        });
+        let response = completed_response(&json!({"status":"completed", "output":[call]})).unwrap();
+        assert_eq!(response.tool_calls[0].arguments, ToolArguments::InvalidJson);
+        assert_eq!(response.replay, AssistantReplay::OpenAI(vec![call.clone()]));
+        assert_eq!(response.into_text(), Err(LLMError::InvalidResponse));
+
+        for invalid in [
+            json!({"call_id":""}),
+            json!({"call_id":"   "}),
+            json!({"call_id":null}),
+            json!({"name":""}),
+            json!({"arguments":{}}),
+        ] {
+            let mut invalid_call = call.clone();
+            for (key, value) in invalid.as_object().unwrap() {
+                invalid_call[key] = value.clone();
+            }
+            assert_eq!(
+                completed_response(&json!({"status":"completed", "output":[invalid_call]})),
+                Err(LLMError::InvalidResponse)
+            );
+        }
+        assert_eq!(
+            completed_response(&json!({"status":"completed", "output":[call, call]})),
+            Err(LLMError::InvalidResponse)
+        );
+        let mut incomplete = call;
+        incomplete["status"] = json!("in_progress");
+        assert_eq!(
+            completed_response(&json!({"status":"completed", "output":[incomplete]})),
+            Err(LLMError::IncompleteResponse)
+        );
+    }
+
+    #[test]
+    fn provider_specific_history_cannot_be_sent_to_another_provider() {
+        assert_eq!(
+            request_body(
+                "test-model",
+                LLMRequest {
+                    system_prompt: "",
+                    messages: &[LLMMessage::Assistant(AssistantReplay::Anthropic(vec![]))],
+                    tools: &[],
+                },
+                ToolSchemaMode::Auto,
+                None,
+            ),
+            Err(LLMError::InvalidResponse)
+        );
+    }
+
+    #[test]
+    fn completed_empty_or_reasoning_only_outputs_remain_structured_responses() {
+        for output in [
+            json!([]),
+            json!([{"type":"reasoning", "id":"reasoning-1", "summary":[], "encrypted_content":"opaque-test"}]),
+            json!([{"type":"message", "role":"assistant", "status":"completed", "content":[]}]),
+        ] {
+            let response = completed_response(&json!({
+                "status":"completed", "output":output
+            }))
+            .unwrap();
+            assert_eq!(response.text, None);
+            assert!(response.tool_calls.is_empty());
+            assert_eq!(
+                response.replay,
+                AssistantReplay::OpenAI(output.as_array().unwrap().clone())
+            );
+            assert_eq!(response.into_text(), Err(LLMError::InvalidResponse));
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_invoke_rejects_a_completed_empty_answer() {
+        let app = Router::new().route("/responses", post(|| async { completed("") }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut provider = OpenAIChat::with_api_key(
+            OpenAIConfig {
+                model: Some("test-model".into()),
+                preferred_auth: None,
+                api_key: Some(SecretString::new("fake-test-key").unwrap()),
+            },
+            retry_config(),
+        )
+        .unwrap();
+        provider.endpoint = format!("http://{address}/responses");
+        let result = provider.invoke("Hello").await;
+        server.abort();
+        assert_eq!(result, Err(LLMError::InvalidResponse));
     }
 }
