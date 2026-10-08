@@ -8,6 +8,9 @@ Refresh after changing dependency manifests or adding subprojects. Curated
 `automerge_minor` values are preserved on refresh, as are non-empty gates.
 Minor-update automerge is enabled for Rust, Node, and GitHub Actions by user
 choice during `/renovate-sync init` on 2026-09-20.
+Docker image maintenance was added on 2026-10-09 with minor-update automerge
+disabled by the project architect. The image workflow uses native architecture
+builds; published runtime digest promotion remains reviewed and manual.
 
 ```yaml
 subprojects:
@@ -22,7 +25,7 @@ subprojects:
     lockfile: Cargo.lock
     manifest_hashes:
       Cargo.toml: "355cf94f346f97b0fb3569c379117b4b64edb0b7371e7d1edae2993cb3ba157d"
-      core/Cargo.toml: "1232c56b3717e005c0b9ae0eeeecfbce614d5109fd16ffe9b0c2b6df625c9c9e"
+      core/Cargo.toml: "12d4ab774e63423617b20f3b16efae03faf96c224ca1dd8f9110d8ffc5ac58dc"
     update_commands:
       security: cargo audit
       patch: cargo update
@@ -86,10 +89,12 @@ subprojects:
     manifests:
       - .github/workflows/ci.yml
       - .github/workflows/renovate.yml
+      - .github/workflows/execution-image.yml
     lockfile: null
     manifest_hashes:
-      .github/workflows/ci.yml: "7f9e680762ba05af4d21350ce86cc239a4405f3cabf8e02e160e34595398a4c4"
-      .github/workflows/renovate.yml: "dafe3c0b1c62b71db22593b5caf3e9cf45d1d9f3bb642f9102ee1bc8b807aabe"
+      .github/workflows/ci.yml: "816680305baa35d1dbb2ace6a680d1bef186e90bf700cd6c32d665569e557568"
+      .github/workflows/renovate.yml: "76d0db39f40a3330200c6154066dacced11611ab22174c628e6d832a36443c94"
+      .github/workflows/execution-image.yml: "1e00eb99788daa862c7d3fbba7b40fbb2e22ae653bd6636c8ff3c03facd63b15"
     update_commands:
       security: actionlint
       patch: ""
@@ -103,16 +108,49 @@ subprojects:
     excluded: []
     manual-only: []
     notes:
-      - "tag-pinned: CI uses full version tags (actions/checkout@v7.0.1 and actions/setup-node@v7.0.0). Preserve this convention; SHA pinning may be considered separately."
-      - "The Renovate workflow uses actions/checkout@v7.0.1 and renovatebot/github-action@v46.3.6. The template's v46 ref does not exist upstream, so a verified full version tag is used. It runs daily at 06:00 UTC and on workflow_dispatch; RENOVATE_TOKEN must be configured before use."
+      - "tag-pinned: CI uses verified full version tags. Preserve this convention; SHA pinning may be considered separately."
+      - "The Renovate workflow uses actions/checkout@v7.0.1 and renovatebot/github-action@v46.3.7. Preserve its verified tags and automatic repository-config discovery rather than restoring obsolete template refs or configurationFile. It runs daily at 06:00 UTC and on workflow_dispatch."
+      - "Execution image checks run natively on ubuntu-24.04 and ubuntu-24.04-arm. PR jobs are read-only; only main publication jobs can write packages. No emulation or scheduled rebuilds are used."
       - "Patch and minor commands are resolved per external uses reference via the github-actions playbook and GitHub tag lookups; empty strings are not a blanket skip for this ecosystem."
       - "Major action updates always require confirmation under the playbook, and runner changes require manual review; do not treat them as ordinary tag refreshes."
       - "The security tier also queries GitHub advisories per external action and applies fixes individually; actionlint alone is not an advisory scan."
       - "CI runs on ubuntu-latest for pushes and pull requests, with contents: read permissions; Node 24 runs the repository's Cargo command wrappers."
-      - "actionlint is not installed at refresh time; install it with user approval before running workflow update validation (brew install actionlint)."
+      - "Use a verified actionlint release for workflow validation; a temporary installation is sufficient."
       - "pinact and yamlfmt are not installed; preserve tag pins, use gh for tag lookups, and omit workflow formatting until a formatter is chosen."
+  - id: base-execution-py3x
+    path: core/images/base-execution-py3.x
+    ecosystem: dockerfile
+    automerge_minor: false
+    working_directory: .
+    manifests:
+      - core/images/base-execution-py3.x/Dockerfile
+    lockfile: null
+    manifest_hashes:
+      core/images/base-execution-py3.x/Dockerfile: "7389b21cd2308045a9a744473014a2491d33a9422b19e44b3a56e14e20f38016"
+    update_commands:
+      security: ""
+      patch: ""
+      minor: ""
+      major: ""
+    gate:
+      - python3 core/images/base-execution-py3.x/build.py
+      - python3 core/images/base-execution-py3.x/smoke.py
+    prerequisites:
+      - python3 --version
+      - docker version
+      - docker buildx version
+    excluded: []
+    manual-only: []
+    notes:
+      - "Docker Official Python, full patch version and slim-trixie variant pinned by multi-platform digest in FROM; do not compile Python or install extra packages."
+      - "Image maintenance requires Python 3.10+ and a Docker CLI supporting build --check. Runtime boot uses Bollard directly."
+      - "Renovate manages FROM patch/digest updates with automerge after native image checks; minor updates need review and global major rules require dashboard approval."
+      - "The Dockerfile is the sole upstream version/digest source. approved-image.ref instead pins our published GHCR artifact and is updated only through reviewed promotion."
+      - "Tier commands are resolved against the Dockerfile by update-manager or Renovate; no generic image-version rewriting command is configured."
+      - "CI builds and smoke-tests linux/amd64 and linux/arm64 natively. Main publishes the tested artifacts and reports the combined immutable digest."
+      - "The public ghcr.io/algorithme/base-execution-py3.x image contains no application source or personal data; the source repository remains private."
 ```
 
-No Python, Dockerfile, Docker Compose, or Terraform/OpenTofu subprojects were found.
+No Python package dependency graph, Docker Compose, or Terraform/OpenTofu subprojects were found.
 No exclusions or version constraints have been configured. This refresh records
 commands and manifest hashes; it does not update dependencies or run quality gates.
