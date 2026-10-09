@@ -9,6 +9,7 @@ publish = false
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "query"] }
 backon = { version = "1.6", default-features = false, features = ["std", "tokio-sleep"] }
 base64 = "0.23"
+bollard = { version = "=0.21.1", default-features = false, features = ["pipe"] }
 httpdate = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 jsonschema = { version = "0.58.5", default-features = false }

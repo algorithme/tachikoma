@@ -8,6 +8,7 @@ text interface.
 ```text
 main --> tachikoma_core::serve()
            |-- Config::from_env()     reads server configuration once
+           |-- execution::ensure_ready()  local Docker + approved image
            +-- web                   local setup and stateless text invocation
 
 Library caller --> ConfigurableAgent --> LLMChat::complete(history, tools)
@@ -19,6 +20,77 @@ Library caller --> ConfigurableAgent --> LLMChat::complete(history, tools)
                    |-- API key                            +-- API key
                    +-- ChatGPT subscription
 ```
+
+## Docker startup prerequisite
+
+Before binding HTTP, `serve()` checks a local Docker daemon and the reviewed
+Python execution image. Rust core stays on the host. This phase creates no agent
+containers and executes no generated Python. Library callers constructing a
+`ConfigurableAgent` directly do not invoke this application startup check.
+
+The public `ghcr.io/algorithme/base-execution-py3.x` image contains Python 3.13
+from the Docker Official slim Debian image, bundled pip, and an owned workspace
+for UID/GID `10001:10001`. NumPy, pandas and workers are deferred. See the
+[image maintenance guide](images/base-execution-py3.x/README.md) for build,
+native smoke testing, publishing and reviewed digest promotion.
+
+| Private model | Responsibility |
+| --- | --- |
+| `DockerEndpoint` | Validated local Unix socket or local Windows named pipe. |
+| `ExecutionImage` | Compile-time approved GHCR image reference, pinned by digest. |
+| `LinuxArchitecture` | Supported daemon/image architecture: AMD64 or ARM64. |
+| `DockerPreflightError` | Safe configuration, connectivity, compatibility, timeout, pull or image-validation error. |
+
+```text
+serve() -> configuration -> local Docker connection + API negotiation
+                                      |
+                              Linux + native architecture
+                                      |
+                              inspect approved digest
+                                  /         \
+                             present        absent
+                                |             |
+                                |        pull from GHCR
+                                |             |
+                                +---- verify image
+                                          |
+                                  bind HTTP / ready
+
+Any prerequisite failure -> actionable error / exit before HTTP
+```
+
+`DockerEndpoint::from_lookup()` resolves configuration without consulting Docker
+CLI contexts or `DOCKER_HOST`. Defaults are `unix://$HOME/.docker/run/docker.sock`
+on macOS, `unix:///var/run/docker.sock` on Linux and
+`npipe:////./pipe/docker_engine` on Windows. Set `TACHIKOMA_DOCKER_HOST` to another
+absolute local Unix socket or a pipe on the local Windows machine when needed,
+including rootless Linux Docker. Remote TCP/HTTP/SSH endpoints are rejected;
+there is no fallback to another daemon.
+
+`ensure_ready()` coordinates `connect_local_docker()`,
+`ensure_image_available()` and `validate_image()`. The adapter uses Bollard
+0.21.1 with local pipe transports only, negotiates the API, and explicitly sends
+that negotiated version in subsequent requests. The explicit URI modifier works
+around Bollard 0.21.1 dropping its version prefix during URI construction.
+
+The daemon check and individual requests have five-second deadlines. A missing
+image is pulled once, by its exact approved digest and native architecture, with
+a ten-minute overall download deadline. Other inspection errors do not trigger
+downloads. Streamed errors fail preparation, and the image's repository digest,
+Linux OS and architecture are verified before readiness. An approved cached
+image needs no registry access. There is no image override through the environment.
+
+Start Docker Engine or Docker Desktop yourself before starting core. Boot never
+installs Docker, starts the daemon, builds images, creates containers, or prunes
+other Docker resources. High-level readiness logs omit raw daemon/registry errors.
+Image availability does not establish the ADR's future code-execution containment
+guarantees; those gates remain separate.
+
+The fixture tests need no installed/running Docker daemon. A binary startup test
+checks the actionable error and prerequisite-before-bind ordering. Native image
+checks passed in Linux AMD64/ARM64 CI; live startup was verified on macOS ARM64
+Docker Desktop, including an anonymous first pull and cached startup with image
+downloads disabled. The Windows named-pipe transport is not yet live-validated.
 
 ## Agent models and responsibilities
 
@@ -386,6 +458,7 @@ All application environment reads live in `src/common/config.rs`.
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `TACHIKOMA_PORT` | Local HTTP port, 1–65535 | `3000` |
+| `TACHIKOMA_DOCKER_HOST` | Local Docker Unix socket or Windows pipe | OS-specific default above |
 | `TACHIKOMA_LLM_PROVIDER` | Initial selection: `openai` or `anthropic` | Ask in setup |
 | `TACHIKOMA_OPENAI_AUTH_MODE` | Initial OpenAI method: `api_key` or `subscription` | Ask in setup |
 | `TACHIKOMA_OPENAI_MODEL` | OpenAI model available to the selected account | Unset |
@@ -421,13 +494,15 @@ retries remain disabled to avoid multiplying attempts.
 
 - `main.rs`: thin executable that calls the library's `serve()` function.
 - `lib.rs`: public library modules, configuration exports and server startup.
+- `execution/`: private Docker prerequisite models, local adapter and socket-fixture tests.
+- `images/base-execution-py3.x/`: trusted image build, smoke check, maintenance guide and approved published reference.
 - `agent/models.rs`: configuration, prompt/schema sources, outcomes and errors.
 - `agent/configurable_agent.rs`: initialization, tool registration and owned history.
 - `agent/service/agent_loop.rs`: model/tool rounds, batch rules and completion.
 - `agent/service/{prompt_registry,output_validator_registry}.rs`: prompt snapshots and compiled schema lookup.
 - `agent/tool/`: the `Tool` interface and built-in `AnswerTool`.
 - `resources/`: runtime prompt templates and output schemas loaded explicitly.
-- `common/config.rs`: immutable provider configuration and redacted API keys.
+- `common/config.rs`: immutable server/provider/Docker configuration and redacted API keys.
 - `llm/mod.rs` and `llm/models.rs`: `LLMChat`, conversation/tool models, safe errors, bounded HTTP reads and client policy.
 - `llm/retry.rs`: BackON retry policy, `Retry-After` parsing and shared HTTP deadline.
 - `clients/llm/openai_client.rs`: explicit OpenAI authentication choice and Responses SSE parsing.

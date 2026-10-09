@@ -4,8 +4,11 @@ use std::{
     time::Duration,
 };
 
+use crate::execution::DockerEndpoint;
+
 pub(crate) struct Config {
     port: u16,
+    pub(crate) docker: DockerEndpoint,
     pub(crate) llm: LLMProviderConfig,
 }
 
@@ -191,6 +194,7 @@ impl Config {
 
         Ok(Self {
             port,
+            docker: DockerEndpoint::from_lookup(&mut lookup)?,
             llm: LLMProviderConfig {
                 preferred_provider,
                 retry,
@@ -290,7 +294,8 @@ mod tests {
             Ok(values
                 .iter()
                 .find(|(key, _)| *key == name)
-                .map(|(_, value)| (*value).to_owned()))
+                .map(|(_, value)| (*value).to_owned())
+                .or_else(|| (name == "HOME").then(|| "/home/test-user".to_owned())))
         })
     }
 
