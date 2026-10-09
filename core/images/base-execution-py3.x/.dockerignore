@@ -1,0 +1,4 @@
+# The image contains no repository files, including the runtime approval pin.
+**
+!Dockerfile
+!.dockerignore

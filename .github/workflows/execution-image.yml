@@ -1,0 +1,155 @@
+name: Execution image
+
+on:
+  pull_request:
+    paths:
+      - core/images/base-execution-py3.x/Dockerfile
+      - core/images/base-execution-py3.x/.dockerignore
+      - core/images/base-execution-py3.x/build.py
+      - core/images/base-execution-py3.x/smoke.py
+      - .github/workflows/execution-image.yml
+  push:
+    branches: [main]
+    paths:
+      - core/images/base-execution-py3.x/Dockerfile
+      - core/images/base-execution-py3.x/.dockerignore
+      - core/images/base-execution-py3.x/build.py
+      - core/images/base-execution-py3.x/smoke.py
+      - .github/workflows/execution-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: execution-image-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/algorithme/base-execution-py3.x
+  IMAGE_DIRECTORY: core/images/base-execution-py3.x
+
+jobs:
+  validate:
+    name: Validate ${{ matrix.arch }}
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check and build native image
+        run: python3 "$IMAGE_DIRECTORY/build.py" base-execution-py3.x:test
+      - name: Smoke test native image
+        env:
+          PLATFORM: linux/${{ matrix.arch }}
+        run: python3 "$IMAGE_DIRECTORY/smoke.py" base-execution-py3.x:test --platform "$PLATFORM"
+
+  publish-platform:
+    name: Publish ${{ matrix.arch }} candidate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      ARCH: ${{ matrix.arch }}
+      PLATFORM: linux/${{ matrix.arch }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check and build native image
+        run: python3 "$IMAGE_DIRECTORY/build.py" "$IMAGE:sha-$GITHUB_SHA-$ARCH"
+      - name: Smoke test native image
+        run: python3 "$IMAGE_DIRECTORY/smoke.py" "$IMAGE:sha-$GITHUB_SHA-$ARCH" --platform "$PLATFORM"
+      - name: Sign in to GHCR
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+      - name: Push tested image and record its digest
+        run: |
+          docker push "$IMAGE:sha-$GITHUB_SHA-$ARCH"
+          digest="$(docker buildx imagetools inspect "$IMAGE:sha-$GITHUB_SHA-$ARCH" --format '{{json .Manifest}}' | jq -r '.digest')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p "$RUNNER_TEMP/digests"
+          printf '%s\n' "$digest" > "$RUNNER_TEMP/digests/$ARCH.txt"
+      - name: Save platform digest
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: execution-image-digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/${{ matrix.arch }}.txt
+          if-no-files-found: error
+          retention-days: 1
+      - name: Sign out of GHCR
+        if: always()
+        run: docker logout ghcr.io
+
+  publish-manifest:
+    name: Publish multi-platform candidate
+    needs: publish-platform
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download tested platform digests
+        uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: execution-image-digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - name: Sign in to GHCR
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+      - name: Merge immutable platform digests
+        run: |
+          amd64="$(cat "$RUNNER_TEMP/digests/amd64.txt")"
+          arm64="$(cat "$RUNNER_TEMP/digests/arm64.txt")"
+          [[ "$amd64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools create \
+            --tag "$IMAGE:sha-$GITHUB_SHA" \
+            --metadata-file "$RUNNER_TEMP/manifest.json" \
+            "$IMAGE@$amd64" "$IMAGE@$arm64"
+          digest="$(jq -r '."containerimage.descriptor".digest' "$RUNNER_TEMP/manifest.json")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "$IMAGE@$digest" --raw | jq -e \
+            --arg amd64 "$amd64" --arg arm64 "$arm64" \
+            '(.manifests | length == 2) and
+             ([.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest] == [$amd64]) and
+             ([.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest] == [$arm64])'
+          {
+            printf '### Execution image candidate\n\n'
+            printf '`%s@%s`\n\n' "$IMAGE" "$digest"
+            printf 'Commit: `%s`\n\n' "$GITHUB_SHA"
+            printf 'Both native architectures passed the smoke test. The runtime approval pin is unchanged.\n\n'
+            printf 'For the first publication, make the GHCR package public. Verify an anonymous digest pull before approving this candidate.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Sign out of GHCR
+        if: always()
+        run: docker logout ghcr.io
