@@ -56,6 +56,9 @@ credentials. On relevant `main` changes or manual dispatch on `main`, it publish
 each tested platform image and a combined `sha-<commit>` image. Only publishing
 jobs have `packages: write`. The workflow neither uses a moving `latest` tag nor
 changes the approved runtime reference.
+Automatic build attestations are disabled so each tested native image has one
+manifest and the publishing job can verify both exact child digests consistently
+across Docker image-store implementations.
 
 First publication creates a private GHCR package. Change only this package to
 Public in its GitHub package settings, retaining the repository's private

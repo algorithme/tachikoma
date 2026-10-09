@@ -15,7 +15,11 @@ def main() -> int:
     try:
         subprocess.run(["docker", "build", "--check", context], check=True, timeout=120)
         subprocess.run(
-            ["docker", "build", "--tag", args.image, context], check=True, timeout=600
+            # Publish one manifest per native image. Automatic attestations can
+            # otherwise wrap it in an index on containerd-backed Docker stores.
+            ["docker", "build", "--provenance=false", "--tag", args.image, context],
+            check=True,
+            timeout=600,
         )
     except (OSError, subprocess.SubprocessError) as error:
         print(f"Execution image build failed: {error}", file=sys.stderr)
