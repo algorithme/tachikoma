@@ -1,10 +1,62 @@
 # ADR 0001: Docker-backed Python execution with lazy input resources
 
-- **Status:** Accepted architectural direction; implementation is subject to the validation gates below.
+- **Status:** Accepted architectural direction. Basic image and startup prerequisites are implemented; execution remains subject to the validation gates below.
 - **Date:** 2026-10-06; decision revised 2026-10-09.
 - **Decision owner:** Project architect.
 - **Research observed:** 2026-10-05 to 2026-10-09.
-- **Scope:** `core/` only. This ADR records research and proposed interfaces; it does not introduce runtime code, dependencies, images or tests.
+- **Scope:** Core product code and image assets live in `core/`; image publishing and dependency-maintenance files are the necessary repository-level exceptions.
+
+## First implementation: image and startup prerequisites
+
+The first implementation deliberately contains Python only. The scientific
+NumPy/pandas profile described below remains the next approved runtime direction,
+not a dependency of this initial image. The Rust broker continues to run on the
+host; no generated code or agent container runs in this phase.
+
+`base-execution-py3.x` derives from the digest-pinned Docker Official
+`python:3.13.16-slim-trixie` image. It reuses upstream Python and bundled pip,
+installs no packages, defaults to UID/GID `10001:10001`, and provides `/workspace`.
+The isolated build context contains no application source or personal data.
+Native AMD64 and ARM64 CI builds are smoke-tested before publication to public
+`ghcr.io/algorithme/base-execution-py3.x`. Published candidates are promoted by a
+reviewed change to the compiled-in `approved-image.ref`; publication alone does
+not update running or rebuilt applications.
+
+Before binding HTTP, `serve()` verifies local Docker and the approved image.
+Private models are `DockerEndpoint`, `ExecutionImage`, `LinuxArchitecture` and
+`DockerPreflightError`. `DockerEndpoint::from_lookup()` accepts OS-specific local
+defaults or `TACHIKOMA_DOCKER_HOST`, rejecting remote transports and ignoring CLI
+contexts. Bollard `=0.21.1` uses only its `pipe` feature. The adapter explicitly
+prefixes post-negotiation requests with the negotiated API version to work around
+that release's URI-construction defect; a real-transport fixture checks this.
+
+```text
+load config -> connect local Docker -> negotiate API -> inspect daemon
+                                                           |
+                                              inspect approved image
+                                                    /          \
+                                               cached          absent
+                                                  |              |
+                                                  |       pull exact digest
+                                                  |              |
+                                                  +---- verify platform/digest
+                                                                 |
+                                                            start HTTP
+```
+
+`ensure_ready()`, `connect_local_docker()`, `ensure_image_available()` and
+`validate_image()` implement this boundary. Daemon/request checks are limited to
+five seconds and pulling to ten minutes. Only image absence permits a pull;
+errors, mismatches or unsupported platforms stop startup. No image builds,
+daemon startup, container creation or generated execution occur during boot.
+
+Fixture tests cover endpoint restrictions, negotiation, deadlines, cached and
+missing images, pull failures and digest/platform validation. Native image smoke
+checks cover Python version, architecture, identity and workspace behavior.
+These establish prerequisites only; they do not satisfy the full execution,
+containment, lifecycle or data-transfer gates below. See the
+[core README](../../README.md) and
+[image guide](../../images/base-execution-py3.x/README.md) for operational details.
 
 ## Context and decision
 
@@ -31,7 +83,8 @@ initial integration and broader host compatibility. It supersedes the interim
 Apple-container choice. Apple containers and other VM-backed runtimes remain
 alternatives; they are not additional backends to implement now. The previously
 researched Bollard release is **0.21.1**; pin the tested dependency and negotiate
-Engine API compatibility explicitly. This phase changes only this ADR.
+Engine API compatibility explicitly. The first implementation above adds only
+image preparation and startup prerequisites.
 
 Prepare single-use Python processes with approved libraries imported in advance.
 A worker executes one request and exits. Keep editable files for the container
@@ -360,7 +413,8 @@ operations. Different agents can execute concurrently within global admission.
 Place future adapters under `agent::tool` and runtime ownership in a dedicated
 `execution` module within core. Keep configuration/models, runtime lifecycle and
 Docker integration conceptually separate, without a generic multi-backend framework.
-No proposed source files or API changes are introduced by this ADR.
+The private `execution` module initially contains only the prerequisite adapter;
+the runtime ownership and tool APIs below remain proposed.
 
 | Proposed boundary | Responsibility |
 | --- | --- |
@@ -774,5 +828,5 @@ VM snapshots, managed remote execution, Wasmtime/JavaScript implementation, GPU
 support, generated subprocesses, runtime package installation, durable artifact
 storage, inter-agent file/message-board communication and deployment automation
 are deferred. Future changes to these capabilities require their own explicit
-architectural decision. This phase updates only this ADR; it installs no runtime
-and adds no implementation, dependencies or tests.
+architectural decision. The basic image/startup implementation above does not
+introduce these deferred execution capabilities.

@@ -25,7 +25,7 @@ subprojects:
     lockfile: Cargo.lock
     manifest_hashes:
       Cargo.toml: "355cf94f346f97b0fb3569c379117b4b64edb0b7371e7d1edae2993cb3ba157d"
-      core/Cargo.toml: "12d4ab774e63423617b20f3b16efae03faf96c224ca1dd8f9110d8ffc5ac58dc"
+      core/Cargo.toml: "928c939e8d1518c216b114522a4f8e18ce8a44bdd8bc898413e686685eab0288"
     update_commands:
       security: cargo audit
       patch: cargo update
@@ -42,7 +42,7 @@ subprojects:
     manual-only: []
     notes:
       - "One virtual workspace (resolver 3), with the unpublished edition-2024 tachikoma-core binary in core/ and a shared root Cargo.lock."
-      - "Direct dependencies: axum and tokio; test dependency: tower."
+      - "Core also pins Bollard =0.21.1 with only the pipe feature for local Docker startup prerequisites; tower remains a test dependency."
       - "rust-toolchain.toml pins Rust 1.98.1 with rustfmt and clippy. CI reads the same file using rustup show; Cargo dependency commands do not update this toolchain pin."
       - "README.md repeats the Rust, Axum, and Tokio versions; keep the documentation consistent when those versions change."
       - "CI gates use npm wrappers for cargo fmt --all -- --check, cargo clippy --workspace --all-targets --locked -- -D warnings, and cargo test --workspace --locked."
