@@ -77,10 +77,12 @@ Use an empty temporary Docker credential configuration to test anonymous access
 without logging out of the user's existing registry sessions. Pull by the exact
 approved digest, not by its commit tag.
 
-Renovate maintains the upstream Dockerfile tag and digest. Patch/digest changes
-can automerge after checks; Python minor changes require review, and major
-changes require dashboard approval. Publishing a new candidate does not change
-an existing core binary's approved image.
+Renovate maintains the upstream Dockerfile tag and digest within Python 3.13.
+Patch/digest changes can automerge after checks. Newer Python minor or major
+versions are blocked until the project explicitly revisits this policy and
+updates the Python rule in `renovate.json5`'s user-managed region and the matching
+inventory notes. Publishing a new candidate does not change an existing core
+binary's approved image.
 
 Image availability and these smoke checks do not establish the ADR's future
 untrusted-code containment gates. No agent workloads run in this phase.
