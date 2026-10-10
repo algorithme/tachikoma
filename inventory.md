@@ -144,7 +144,8 @@ subprojects:
     notes:
       - "Docker Official Python, full patch version and slim-trixie variant pinned by multi-platform digest in FROM; do not compile Python or install extra packages."
       - "Image maintenance requires Python 3.10+ and a Docker CLI supporting build --check. Runtime boot uses Bollard directly."
-      - "Renovate manages FROM patch/digest updates with automerge after native image checks; minor updates need review and global major rules require dashboard approval."
+      - "Keep the execution image on Python 3.13 (project decision on 2026-10-10, PR #19). Renovate manages 3.13 patch/digest updates with automerge after native image checks; newer minor or major versions require explicitly revisiting this policy."
+      - "The Python 3.13 tag constraint lives in renovate.json5's preserved user-managed region; preserve it during /renovate-sync. Apply the same 3.13 policy during manual image updates."
       - "The Dockerfile is the sole upstream version/digest source. approved-image.ref instead pins our published GHCR artifact and is updated only through reviewed promotion."
       - "Tier commands are resolved against the Dockerfile by update-manager or Renovate; no generic image-version rewriting command is configured."
       - "CI builds and smoke-tests linux/amd64 and linux/arm64 natively. Main publishes the tested artifacts and reports the combined immutable digest."
@@ -152,5 +153,6 @@ subprojects:
 ```
 
 No Python package dependency graph, Docker Compose, or Terraform/OpenTofu subprojects were found.
-No exclusions or version constraints have been configured. This refresh records
+No exclusions have been configured. The Python execution image is constrained to
+3.13 in Renovate's user-managed rules as recorded above. This inventory records
 commands and manifest hashes; it does not update dependencies or run quality gates.
