@@ -1,0 +1,14 @@
+{
+  "system_prompt": {
+    "file": "../templates/default_agent.md"
+  },
+  "tools": {
+    "answer": {
+      "output_schema": {
+        "file": "../output_schemas/answer.json"
+      }
+    }
+  },
+  "terminal_tools": ["answer"],
+  "max_turns": 10
+}

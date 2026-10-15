@@ -5,7 +5,7 @@ use tracing_subscriber::prelude::*;
 use tachikoma_core::{
     OpenAIAuthMode, OpenAIConfig, RetryConfig,
     agent::{
-        AgentConfig, AgentOutcome, ConfigurableAgent, OutputSchemaSource, PromptSource,
+        AgentConfig, AgentOutcome, ConfigurableAgent, PromptSource,
         service::{OutputValidatorRegistry, PromptRegistry},
     },
     clients::llm::openai_client::OpenAIChat,
@@ -62,8 +62,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         )
         .init();
 
-    tracing::info!("Loading agent prompt and output schema");
+    tracing::info!("Loading agent profile, prompt and output schema");
     let resources = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
+    let config = AgentConfig::from_profile_file(resources.join("agents/default.json"))?;
     let prompts = PromptRegistry::from_directory(
         resources.join("templates"),
         PromptSource::Reference("configurable_agent_prefix".into()),
@@ -80,10 +81,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
         RetryConfig::default(),
     )
     .await?;
-    let config = AgentConfig::new(
-        PromptSource::Reference("default_agent".into()),
-        OutputSchemaSource::Reference("answer".into()),
-    );
     let mut agent =
         ConfigurableAgent::new(config, Arc::new(client), &prompts, &validators, vec![])?;
 

@@ -100,7 +100,7 @@ An **invocation** is one user request and all the model turns needed to handle i
 
 | Type | Responsibility |
 | --- | --- |
-| `AgentConfig` | System prompt source, Answer schema source, final-tool names and maximum turns. |
+| `AgentConfig` | System prompt source, Answer schema source, tool option metadata, final-tool names and maximum turns. |
 | `PromptSource` / `OutputSchemaSource` | An asset reference or content supplied inline. |
 | `ConfigurableAgent<L>` | Initialized configuration and the history for one conversation. |
 | `AgentLoop` | Private, stateless service that applies the execution and stopping rules. |
@@ -224,6 +224,42 @@ disabled. `format` is an annotation, not a validation check. The configured outp
 schema is the `answer` tool's input/output contract. Other tools have their own
 input schemas; another final tool returns its own output without applying the
 Answer schema.
+
+### Agent profiles
+
+Load a JSON profile with `AgentConfig::from_profile_file(path)?`. The bundled
+[Default Agent profile](resources/agents/default.json) contains:
+
+```json
+{
+  "system_prompt": {"file": "../templates/default_agent.md"},
+  "tools": {
+    "answer": {"output_schema": {"file": "../output_schemas/answer.json"}}
+  },
+  "terminal_tools": ["answer"],
+  "max_turns": 10
+}
+```
+
+All four top-level fields are required; unknown fields are rejected. The output
+schema belongs in `tools.answer.output_schema`, which is required. Each prompt or
+schema source contains exactly one `file` or `inline` field. Inline forms are
+`{"inline": "Prompt text"}` for a prompt and `{"inline": {"type": "object"}}`
+for a schema. Inline text is always literal, even if it resembles a path.
+
+Relative paths resolve from the profile's directory, independently of the working
+directory; absolute paths are also accepted. The profile and referenced files
+must be regular files, not symlinks. Prompt files contain UTF-8 text; schema files
+contain JSON objects. Loading reads each source into a snapshot: edits apply on
+the next load without rebuilding, but do not alter an existing agent. Existing
+Rust constructors and registry references continue to work.
+
+`tools` is a dictionary of tool names to option objects. The loader resolves
+Answer's `output_schema` into `AgentConfig.output_schema`; all option objects,
+including nested values, remain in `AgentConfig.tools` as declared. Other options
+are retained for future use. Declarations do not enable, disable or configure
+runtime tools yet: Answer remains automatic and other tools still come from the
+constructor. Editing this metadata after loading does not reconfigure the agent.
 
 ## Loop behavior
 
@@ -358,8 +394,10 @@ To run the agent loop with your saved ChatGPT subscription:
 cargo run --locked -p tachikoma-core --example basic_agent -- "<model-available-to-your-openai-account>" "What is 2 + 2?"
 ```
 
-The example loads the bundled resources using the core manifest directory and
-registers only `answer`, the default final tool. It prints the model-turn count,
+The example loads `resources/agents/default.json` and the resource registries
+using the core manifest directory, before restoring credentials. Edit the profile
+or its referenced files to change the next invocation. It registers only `answer`,
+the default final tool. It prints the model-turn count,
 final tool name and validated output dictionary. Without a task argument, it asks
 "What is 2 + 2?". An error or an unsatisfactory response exits unsuccessfully.
 The loop runs locally and sends the task to OpenAI using saved subscription
@@ -497,11 +535,12 @@ retries remain disabled to avoid multiplying attempts.
 - `execution/`: private Docker prerequisite models, local adapter and socket-fixture tests.
 - `images/base-execution-py3.x/`: trusted image build, smoke check, maintenance guide and approved published reference.
 - `agent/models.rs`: configuration, prompt/schema sources, outcomes and errors.
+- `agent/profile.rs`: runtime JSON profile loading and profile-relative file resolution.
 - `agent/configurable_agent.rs`: initialization, tool registration and owned history.
 - `agent/service/agent_loop.rs`: model/tool rounds, batch rules and completion.
 - `agent/service/{prompt_registry,output_validator_registry}.rs`: prompt snapshots and compiled schema lookup.
 - `agent/tool/`: the `Tool` interface and built-in `AnswerTool`.
-- `resources/`: runtime prompt templates and output schemas loaded explicitly.
+- `resources/`: runtime agent profiles, prompt templates and output schemas loaded explicitly.
 - `common/config.rs`: immutable server/provider/Docker configuration and redacted API keys.
 - `llm/mod.rs` and `llm/models.rs`: `LLMChat`, conversation/tool models, safe errors, bounded HTTP reads and client policy.
 - `llm/retry.rs`: BackON retry policy, `Retry-After` parsing and shared HTTP deadline.
