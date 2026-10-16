@@ -2,6 +2,7 @@
 
 mod configurable_agent;
 mod models;
+mod profile;
 pub mod service;
 pub mod tool;
 

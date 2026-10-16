@@ -161,6 +161,72 @@ fn results(message: &LLMMessage) -> &[ToolResult] {
 }
 
 #[tokio::test]
+async fn bundled_profile_resolves_real_resources_and_completes_through_answer() {
+    let config = AgentConfig::from_profile_file(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/agents/default.json"),
+    )
+    .unwrap();
+    let model = ScriptedModel::new([answer("done", "4")]);
+    let mut agent = agent(model.clone(), config, vec![]);
+    assert_eq!(
+        agent.invoke("What is 2 + 2?").await.unwrap(),
+        AgentOutcome::Completed {
+            tool_name: "answer".into(),
+            output: json!({"text": "4"}),
+        }
+    );
+    let requests = model.requests.lock().unwrap();
+    let bundled_schema: Value =
+        serde_json::from_str(include_str!("../resources/output_schemas/answer.json")).unwrap();
+    assert_eq!(requests[0].tools[0].input_schema, bundled_schema);
+    assert!(
+        requests[0]
+            .prompt
+            .contains(include_str!("../resources/templates/default_agent.md").trim())
+    );
+}
+
+#[tokio::test]
+async fn profile_answer_schema_validates_calls_without_registering_declared_tools() {
+    let custom_schema = json!({"type": "object", "properties": {"count": {"type": "integer"}},
+        "required": ["count"], "additionalProperties": false});
+    let options = json!({"future": {"enabled": true, "values": [1, "two"]}});
+    let profile = json!({
+        "system_prompt": {"inline": "Count accurately."},
+        "tools": {"answer": {"output_schema": {"inline": custom_schema}}, "future_tool": options},
+        "terminal_tools": ["answer"], "max_turns": 2
+    });
+    let path =
+        std::env::temp_dir().join(format!("tachikoma-profile-{}.json", uuid::Uuid::new_v4()));
+    std::fs::write(&path, profile.to_string()).unwrap();
+    let loaded = AgentConfig::from_profile_file(&path);
+    std::fs::remove_file(path).unwrap();
+    let config = loaded.unwrap();
+    assert_eq!(config.tools["future_tool"], *options.as_object().unwrap());
+    let model = ScriptedModel::new([
+        answer("invalid", "4"),
+        Ok(response(vec![call("valid", "answer", json!({"count": 4}))])),
+    ]);
+    let mut agent = agent(model.clone(), config, vec![]);
+    assert_eq!(
+        agent.invoke("Count to four").await.unwrap(),
+        AgentOutcome::Completed {
+            tool_name: "answer".into(),
+            output: json!({"count": 4}),
+        }
+    );
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].tools.len(), 1);
+    assert_eq!(requests[0].tools[0].name, "answer");
+    assert_eq!(requests[0].tools[0].input_schema, custom_schema);
+    assert_eq!(
+        results(requests[1].history.last().unwrap())[0].outcome,
+        Err(ToolError::InvalidArguments)
+    );
+}
+
+#[tokio::test]
 async fn answer_completes_immediately_and_history_survives_until_explicitly_cleared() {
     let model = ScriptedModel::new([
         answer("one", "First"),

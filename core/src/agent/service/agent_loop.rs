@@ -207,9 +207,21 @@ impl AgentLoop {
                 pending.push(async move {
                     let tool_started = Instant::now();
                     tracing::info!("Executing tool");
+                    tracing::debug!(
+                        target: "tachikoma_core::agent::content",
+                        input = %arguments,
+                        "Tool input"
+                    );
                     let outcome = tool.implementation.execute(arguments).await;
                     match &outcome {
-                        Ok(_) => tracing::info!(elapsed_ms = tool_started.elapsed().as_millis(), "Tool execution succeeded"),
+                        Ok(output) => {
+                            tracing::debug!(
+                                target: "tachikoma_core::agent::content",
+                                output = %output,
+                                "Tool output"
+                            );
+                            tracing::info!(elapsed_ms = tool_started.elapsed().as_millis(), "Tool execution succeeded");
+                        }
                         Err(error) => tracing::warn!(elapsed_ms = tool_started.elapsed().as_millis(), error = ?error, "Tool execution failed"),
                     }
                     (index, outcome)

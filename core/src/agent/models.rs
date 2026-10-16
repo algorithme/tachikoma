@@ -1,6 +1,6 @@
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::llm::LLMError;
 
@@ -19,7 +19,10 @@ pub enum OutputSchemaSource {
 #[derive(Clone)]
 pub struct AgentConfig {
     pub system_prompt: PromptSource,
+    /// The resolved Answer schema used by the runtime.
     pub output_schema: OutputSchemaSource,
+    /// Original profile declarations; changing these does not reconfigure runtime tools.
+    pub tools: BTreeMap<String, Map<String, Value>>,
     pub terminal_tools: Vec<String>,
     pub max_turns: usize,
 }
@@ -30,6 +33,7 @@ impl AgentConfig {
         Self {
             system_prompt,
             output_schema,
+            tools: BTreeMap::from([("answer".into(), Map::new())]),
             terminal_tools: vec!["answer".into()],
             max_turns: 10,
         }
