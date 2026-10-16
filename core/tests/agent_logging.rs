@@ -213,13 +213,24 @@ async fn info_logs_remain_useful_without_disclosing_conversation_or_tool_data() 
 }
 
 #[tokio::test]
-async fn debug_logs_show_prompts_and_model_answers_without_internal_provider_data() {
+async fn debug_logs_show_tool_inputs_and_outputs_without_internal_provider_data() {
     let logs = exercise_agent_with_logs(tracing::Level::DEBUG).await;
     assert!(logs.contains("tachikoma_core::agent::content"));
     assert_eq!(logs.matches("Agent prompt").count(), 2);
     assert_eq!(logs.matches("Model answer").count(), 4);
     assert_eq!(logs.matches("Model tool call").count(), 4);
     assert_eq!(logs.matches("Available tool").count(), 4);
+    // The unknown call is rejected, so only three calls actually execute.
+    assert_eq!(logs.matches("Tool input").count(), 3);
+    assert_eq!(logs.matches("Tool output").count(), 3);
+    for line in logs
+        .lines()
+        .filter(|line| line.contains("Tool input") || line.contains("Tool output"))
+    {
+        for field in ["invocation_id=", "turn=", "call_index=", "tool="] {
+            assert!(line.contains(field), "Missing tool correlation: {field}");
+        }
+    }
 
     for content in [
         INPUT,
@@ -228,6 +239,7 @@ async fn debug_logs_show_prompts_and_model_answers_without_internal_provider_dat
         PREFIX,
         ASSISTANT_TEXT,
         ARGUMENT,
+        TOOL_OUTPUT,
         ANSWER,
         UNKNOWN_TOOL,
         SCHEMA,
@@ -244,13 +256,15 @@ async fn debug_logs_show_prompts_and_model_answers_without_internal_provider_dat
         "text=",
         "tool=",
         "arguments=",
+        "input=",
+        "output=",
         "description=",
         "input_schema=",
         "final_tool=",
     ] {
         assert!(logs.contains(field), "Missing DEBUG content field: {field}");
     }
-    for private in [REPLAY, "PRIVATE_CALL_ID", TOOL_OUTPUT] {
+    for private in [REPLAY, "PRIVATE_CALL_ID"] {
         assert!(
             !logs.contains(private),
             "DEBUG logs exposed internal data outside the requested content"

@@ -455,7 +455,8 @@ a generated ID; concurrent tools have their own spans (groups of related events)
 Events include turn numbers, counts, registered tool names and elapsed milliseconds.
 HTTP retries report the status, next attempt and wait duration.
 
-To display prompts, tool definitions and model answers, put `--debug` before the model:
+To display prompts, tool definitions, tool inputs/outputs and model answers, put
+`--debug` before the model:
 
 ```sh
 cargo run --locked -p tachikoma-core --example basic_agent -- --debug "gpt-6-luna" "What is 2+2"
@@ -468,6 +469,10 @@ response's text and tool calls with their arguments. This includes answers retur
 when the model supplies no separate text. Malformed argument JSON is shown as
 `<invalid JSON>` because the adapters do not retain the original malformed text.
 These conversation fields are displayed without redaction.
+Each executed tool also logs `Tool input` with its validated JSON arguments and
+`Tool output` with its returned JSON. These events include the invocation ID,
+turn, call index and tool name. Failed executions report `Tool execution failed`
+with the tool error; rejected calls do not produce execution input/output events.
 DEBUG also includes the example's model/connection, individual HTTP attempts,
 provider tool settings (including OpenAI's namespace), and the strict-schema
 decision for each tool index. OpenAI logs completed output-item categories and
@@ -476,11 +481,11 @@ events, without printing opaque replay content. This is an explicit command opti
 Cargo's debug/release build profile.
 
 INFO and higher levels omit conversation content. Authentication headers, stored
-credentials, opaque provider replay/reasoning, provider call IDs and
-tool-result payloads are not added to diagnostic events at any level. Retained
-history is not dumped; new prompts
-and responses are logged as the invocation proceeds. The final answer is still
-printed explicitly as the example's result on standard output.
+credentials, opaque provider replay/reasoning and provider call IDs are not added
+to diagnostic events at any level. Tool inputs and outputs are shown as supplied
+only at DEBUG. Retained history is not dumped; new prompts and responses are logged
+as the invocation proceeds. The final answer is still printed explicitly as the
+example's result on standard output.
 
 The library does not install a global subscriber. Applications embedding core
 choose their own subscriber, filtering and output destination. Enabling DEBUG for
