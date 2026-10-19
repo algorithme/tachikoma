@@ -1,6 +1,6 @@
 # ADR 0001: Docker-backed Python execution with lazy input resources
 
-- **Status:** Accepted architectural direction. Basic image and startup prerequisites are implemented; execution remains subject to the validation gates below.
+- **Status:** Accepted architectural direction. Image prerequisites and the private Python runtime are implemented. Agent integration and the remaining validation gates are deferred.
 - **Date:** 2026-10-06; decision revised 2026-10-09.
 - **Decision owner:** Project architect.
 - **Research observed:** 2026-10-05 to 2026-10-09.
@@ -57,6 +57,52 @@ These establish prerequisites only; they do not satisfy the full execution,
 containment, lifecycle or data-transfer gates below. See the
 [core README](../../README.md) and
 [image guide](../../images/base-execution-py3.x/README.md) for operational details.
+
+## Second implementation: private execution runtime
+
+On 2026-10-17, core added a private `AgentRuntime`, an embedded launcher and
+Docker runtime tests. No agent tool uses this runtime yet. The input-resource set
+is empty. Tool integration, input copying, scientific packages, file tools and
+artifact export remain deferred. This note does not mark the whole ADR implemented.
+
+The runtime reuses the checked Docker client, approved digest and negotiated API
+prefix. Server startup still performs prerequisite checks only. `create()` reserves
+one of four session slots and prepares a private container. A fixed keeper runs
+as UID/GID 10000. A fresh worker runs as UID/GID 10001 for each request.
+
+The launcher checks effective cgroup v2 and mount limits before it reads source.
+It installs a synchronized seccomp filter through standard-library `ctypes`.
+The filter denies process creation, executable replacement, cross-process injection
+and alternate syscall interfaces. It returns `ENOSYS` for `clone3` and checks the
+reviewed thread fallback. Isolated startup prevents workspace files from replacing
+trusted imports. Readiness reports the actual Python version and verifies `math`,
+`decimal`, `fractions`, `statistics`, `itertools`, `csv` and `json`.
+
+Host limits are 30 seconds per execution, 128 MiB memory with no extra swap,
+one CPU, 32 process/thread slots, and 64 KiB each for source, stdout and stderr.
+Temporary mounts bound workspace, temporary files and shared memory to
+16/8/4 MiB and 4096/1024/256 inodes. Preparation and Docker requests have
+five-second deadlines. Image pulls retain their ten-minute deadline.
+
+Healthy calls and ordinary Python errors preserve files. Worker exit precedes
+replacement preparation. Runtime failures quarantine the session and trigger
+container removal. Source is never replayed. A later explicit request can create
+an empty session after removal succeeds. The supervisor retains admission during
+uncertain cleanup, including after callers drop. The keeper exits on input closure
+or a 60-second heartbeat lease expiry. Stopped-container reconciliation preserves
+live sessions and unrelated containers.
+
+Socket fixtures test transport, readiness gates, output limits, cancellation,
+uncertain creation, cleanup reservations and ownership. All nine live tests passed
+on macOS ARM64 Docker Desktop through its Unix socket, with Python 3.13.16.
+They cover process and resource restrictions, file retention, fresh workers,
+session isolation, timeouts, crashes, cancellation and keeper expiry. CI now
+defines native Linux AMD64 and ARM64 runtime jobs. Their results for this change
+remain pending; the Windows named-pipe runtime is not live-validated.
+
+See the [private runtime guide](../../README.md#private-python-runtime) for the
+fixed limits, lifecycle and test commands. These tests use no provider credentials
+or language-model calls. The data-transfer and agent-facing gates below remain open.
 
 ## Context and decision
 
