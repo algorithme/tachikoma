@@ -74,8 +74,8 @@ impl MockDocker {
         ensure_ready_with_client(
             self.client(),
             &ExecutionImage::from_reference(IMAGE).unwrap(),
-            DAEMON_TIMEOUT,
-            PULL_TIMEOUT,
+            ExecutionPolicy::REQUEST,
+            ExecutionPolicy::IMAGE_PULL,
         )
         .await
     }
@@ -154,6 +154,128 @@ async fn cached_native_images_boot_without_a_pull() {
         assert_eq!(requests[0].1, "/version");
         assert_eq!(requests[1].1, "/v1.45/info");
         assert_eq!(requests[2].1, format!("/v1.45/images/{IMAGE}/json"));
+    }
+}
+
+#[tokio::test]
+async fn prepared_client_keeps_the_negotiated_prefix_for_runtime_operations() {
+    let daemon = MockDocker::new([
+        version(),
+        info("linux", "amd64"),
+        image("amd64"),
+        Reply::Json(StatusCode::OK, json!({"Id": "private-container"})),
+    ])
+    .await;
+    let client = prepare_with_client(
+        daemon.client(),
+        &ExecutionImage::from_reference(IMAGE).unwrap(),
+        ExecutionPolicy::REQUEST,
+        ExecutionPolicy::IMAGE_PULL,
+    )
+    .await
+    .unwrap();
+    client
+        .inspect_container("private-container", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        daemon.requests()[3].1,
+        "/v1.45/containers/private-container/json"
+    );
+}
+
+fn inspection(expected: &ContainerCreateBody) -> Value {
+    let mut config = serde_json::to_value(expected).unwrap();
+    let host = config
+        .as_object_mut()
+        .unwrap()
+        .remove("HostConfig")
+        .unwrap();
+    json!({"Config": config, "HostConfig": host, "State": {"Running": true}})
+}
+
+#[test]
+fn container_inspection_rejects_extra_mounts_and_privileges() {
+    let expected = container_config(IMAGE, "private-session");
+    let inspection = inspection(&expected);
+    for (key, value) in [
+        ("Binds", json!(["/private-host:/workspace"])),
+        (
+            "Mounts",
+            json!([{"Type": "bind", "Source": "/private-host", "Target": "/workspace"}]),
+        ),
+        ("VolumesFrom", json!(["foreign-container"])),
+        ("CapAdd", json!(["SYS_ADMIN"])),
+        ("Privileged", json!(true)),
+    ] {
+        let mut changed = inspection.clone();
+        changed["HostConfig"][key] = value;
+        assert_eq!(
+            verify_container(&serde_json::from_value(changed).unwrap(), &expected),
+            Err(ExecutionError::SetupFailure)
+        );
+    }
+}
+
+#[test]
+fn typed_inspection_requires_configured_controls_and_accepts_daemon_defaults() {
+    let expected = container_config(IMAGE, "private-session");
+    let mut inspection = inspection(&expected);
+    inspection["Config"]["Labels"]["image-label"] = json!("preserved");
+    inspection["HostConfig"]["LogConfig"]["Config"] = json!({});
+    inspection["HostConfig"]["RestartPolicy"]["MaximumRetryCount"] = json!(0);
+    inspection["HostConfig"]["CpuShares"] = json!(0);
+    assert_eq!(
+        verify_container(
+            &serde_json::from_value(inspection.clone()).unwrap(),
+            &expected
+        ),
+        Ok(())
+    );
+
+    for section in ["Config", "HostConfig", "State"] {
+        let mut missing = inspection.clone();
+        missing[section] = Value::Null;
+        assert_eq!(
+            verify_container(&serde_json::from_value(missing).unwrap(), &expected),
+            Err(ExecutionError::SetupFailure)
+        );
+        for field in self::inspection(&expected)[section]
+            .as_object()
+            .unwrap()
+            .keys()
+        {
+            let mut missing = inspection.clone();
+            missing[section].as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                verify_container(&serde_json::from_value(missing).unwrap(), &expected),
+                Err(ExecutionError::SetupFailure),
+                "missing {section}.{field} must fail preparation"
+            );
+        }
+    }
+
+    for (section, field, value) in [
+        ("Config", "User", json!("0:0")),
+        ("Config", "Cmd", json!(["unexpected"])),
+        ("Config", "Labels", json!({OWNER_LABEL: "foreign"})),
+        ("HostConfig", "Memory", json!(1)),
+        ("HostConfig", "MemorySwap", json!(-1)),
+        ("HostConfig", "NanoCpus", json!(0)),
+        ("HostConfig", "PidsLimit", json!(-1)),
+        ("HostConfig", "ShmSize", json!(0)),
+        ("HostConfig", "Tmpfs", json!({})),
+        ("HostConfig", "RestartPolicy", json!({"Name": "always"})),
+        ("HostConfig", "LogConfig", json!({"Type": "json-file"})),
+        ("State", "Running", json!(false)),
+    ] {
+        let mut changed = inspection.clone();
+        changed[section][field] = value;
+        assert_eq!(
+            verify_container(&serde_json::from_value(changed).unwrap(), &expected),
+            Err(ExecutionError::SetupFailure),
+            "changed {section}.{field} must fail preparation"
+        );
     }
 }
 
@@ -254,7 +376,7 @@ async fn daemon_failure_and_timeout_stop_preflight() {
             stalled.client(),
             &ExecutionImage::from_reference(IMAGE).unwrap(),
             Duration::from_millis(50),
-            PULL_TIMEOUT,
+            ExecutionPolicy::IMAGE_PULL,
         )
         .await,
         Err(DockerPreflightError::TimedOut("connection"))
@@ -292,7 +414,7 @@ async fn streamed_pull_errors_and_stalled_bodies_cannot_report_readiness() {
         ensure_ready_with_client(
             stalled.client(),
             &ExecutionImage::from_reference(IMAGE).unwrap(),
-            DAEMON_TIMEOUT,
+            ExecutionPolicy::REQUEST,
             Duration::from_millis(50),
         )
         .await,

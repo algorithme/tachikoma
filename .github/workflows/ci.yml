@@ -31,3 +31,36 @@ jobs:
 
       - name: Test
         run: npm test
+
+  execution-runtime:
+    name: Private Python runtime (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up pinned Rust toolchain
+        run: rustup show
+      - name: Check native Linux Docker
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(docker info --format '{{.OSType}}')" = linux
+          case "$(docker info --format '{{.Architecture}}')" in
+            x86_64|amd64) actual_arch=amd64 ;;
+            aarch64|arm64) actual_arch=arm64 ;;
+            *) exit 1 ;;
+          esac
+          test "$actual_arch" = "$EXPECTED_ARCH"
+      - name: Test private execution with the approved image
+        run: cargo test --locked -p tachikoma-core --lib execution::runtime::tests::docker_ -- --ignored --test-threads=1
