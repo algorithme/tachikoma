@@ -93,21 +93,29 @@ async fn docker_fresh_workers_retained_files_isolation_and_serial_calls() {
     }
     let host = std::env::temp_dir().join(format!("tachikoma-host-{}", Uuid::new_v4()));
     std::fs::write(&host, b"unchanged").unwrap();
+    // Identical paths can name separate files on the host and in the container.
     let source = format!(
-        "open({}, 'w').write('changed')",
+        r#"
+from pathlib import Path
+path = Path({})
+assert not path.exists(), 'host file is visible inside the container'
+try:
+    path.write_text('changed')
+except (FileNotFoundError, PermissionError):
+    pass
+else:
+    assert path.read_text() == 'changed'
+"#,
         serde_json::to_string(host.to_str().unwrap()).unwrap()
     );
-    assert!(
-        !runtime
-            .execute_code(code(&source))
-            .await
-            .unwrap()
-            .std_err
-            .is_empty()
-    );
-    assert_eq!(std::fs::read(&host).unwrap(), b"unchanged");
+    let result = runtime.execute_code(code(&source)).await;
+    let host_contents = std::fs::read(&host);
     std::fs::remove_file(host).unwrap();
     runtime.close().await.unwrap();
+    let result = result.unwrap();
+    assert_eq!(result.std_out, "");
+    assert_eq!(result.std_err, "");
+    assert_eq!(host_contents.unwrap(), b"unchanged");
 }
 
 #[tokio::test]
