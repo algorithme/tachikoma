@@ -4,13 +4,32 @@
 It derives from the Docker Official Python 3.13 slim Debian image, pinned by its
 multi-platform digest in the Dockerfile. Python and bundled pip are reused;
 there is no Python compilation, package installation, or application source in
-this build. NumPy, pandas and execution workers belong to a later phase.
+this build. NumPy and pandas belong to a later phase.
 
 The image defaults to UID/GID `10001:10001` and `/workspace`, also its `HOME`.
 The build context excludes everything except the Dockerfile and `.dockerignore`.
 The public image contains no repository content, approved-image reference,
 credentials or personal files. Its source label links it to the private repository
 for GitHub package permissions.
+
+## Core-supplied workers
+
+Core embeds the trusted launcher in `src/execution/worker.py`. It passes this
+fixed code to isolated, unbuffered Python. Generated source arrives through
+standard input after the launcher verifies its restrictions. The image does not
+contain the launcher or generated code.
+
+The private runtime uses one container per session and a fresh worker per call.
+The keeper uses UID/GID 10000 in `/`. Workers use UID/GID 10001 in `/workspace`.
+Healthy calls retain files in bounded temporary mounts. Python variables and
+imports do not survive a call. No agent tool uses this runtime yet.
+
+The runtime checks cgroup v2, seccomp, mount limits, the actual Python version and
+seven standard-library modules before it accepts source. Its fixed limits and
+live test commands are in the [core runtime guide](../../README.md#private-python-runtime).
+The 2026-10-17 Docker Desktop ARM64 run verified Python 3.13.16 through a Unix
+socket. Native AMD64 and ARM64 runtime CI jobs are configured; their results for
+this change remain pending. Image smoke tests and runtime tests are separate gates.
 
 ## Build and check locally
 
