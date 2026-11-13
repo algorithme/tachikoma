@@ -24,13 +24,14 @@ Library caller --> ConfigurableAgent --> LLMChat::complete(history, tools)
 ## Docker startup prerequisite
 
 Before binding HTTP, `serve()` checks a local Docker daemon and the reviewed
-Python execution image. Rust core stays on the host. This phase creates no agent
+Python execution image. Rust core stays on the host. Startup creates no agent
 containers and executes no generated Python. Library callers constructing a
 `ConfigurableAgent` directly do not invoke this application startup check.
 
 The public `ghcr.io/algorithme/base-execution-py3.x` image contains Python 3.13
 from the Docker Official slim Debian image, bundled pip, and an owned workspace
-for UID/GID `10001:10001`. NumPy, pandas and workers are deferred. See the
+for UID/GID `10001:10001`. Core supplies the execution launcher. NumPy and pandas
+remain deferred. See the
 [image maintenance guide](images/base-execution-py3.x/README.md) for build,
 native smoke testing, publishing and reviewed digest promotion.
 
@@ -83,14 +84,99 @@ image needs no registry access. There is no image override through the environme
 Start Docker Engine or Docker Desktop yourself before starting core. Boot never
 installs Docker, starts the daemon, builds images, creates containers, or prunes
 other Docker resources. High-level readiness logs omit raw daemon/registry errors.
-Image availability does not establish the ADR's future code-execution containment
-guarantees; those gates remain separate.
+The private runtime performs its own container and worker checks before it
+accepts generated source.
 
 The fixture tests need no installed/running Docker daemon. A binary startup test
 checks the actionable error and prerequisite-before-bind ordering. Native image
 checks passed in Linux AMD64/ARM64 CI; live startup was verified on macOS ARM64
 Docker Desktop, including an anonymous first pull and cached startup with image
 downloads disabled. The Windows named-pipe transport is not yet live-validated.
+
+## Private Python runtime
+
+`execution::runtime::AgentRuntime` is private to core. No agent tool uses it yet.
+The input-resource set is empty. Input copying, scientific packages, file tools,
+artifact export and agent integration remain deferred.
+
+A **session** owns one container and its temporary files. A **worker** is a Python
+process for one request. The **launcher** is fixed code embedded in core. A
+**supervisor** owns lifecycle tasks and admission reservations after callers drop.
+
+`create()` checks the approved image, reserves admission and prepares a worker.
+The keeper uses UID/GID 10000 in `/`. Each worker uses UID/GID 10001 in
+`/workspace`. Isolated Python startup ignores workspace modules and user settings.
+The launcher checks the actual Python version and imports `math`, `decimal`,
+`fractions`, `statistics`, `itertools`, `csv` and `json` before it reports readiness.
+
+The container has no network or host mounts. Its root is read-only. Writable paths
+use **tmpfs**, a filesystem that stores files in memory. Docker drops capabilities,
+disables output logging and restart, and enables automatic removal. The worker
+checks cgroup v2 limits and mount limits before it accepts source.
+
+The launcher installs **seccomp**, Linux's system-call filter, through `ctypes`.
+It synchronizes the filter across threads. It denies new processes, executable
+replacement, cross-process injection and alternate syscall interfaces. It permits
+reviewed thread creation and checks the `clone3` fallback before readiness.
+
+| Host limit | Value |
+| --- | --- |
+| Execution, including source transfer and compilation | 30 seconds |
+| Container memory / memory plus swap | 128 MiB / 128 MiB |
+| CPU / process and thread slots | One CPU / 32 slots |
+| Source / each output stream | 64 KiB / 64 KiB |
+| `/workspace` | 16 MiB, 4096 inodes |
+| `/tmp` | 8 MiB, 1024 inodes |
+| `/dev/shm` | 4 MiB, 256 inodes |
+| Resident sessions per core process | Four |
+| Preparation / individual Docker request | Five seconds |
+| Image pull | Ten minutes |
+| Keeper heartbeat / lease | Five seconds / 60 seconds |
+
+An **inode** is a filesystem entry. The mount root also uses one inode.
+Generated source cannot change these limits. Missing controls stop preparation.
+`ExecutionPolicy` defines the fixed values in Rust. Core uses them for Docker
+configuration and passes the launcher its settings as a command argument before
+source transfer. Container inspection checks Bollard's typed response fields.
+
+`execute_code()` serializes requests and sends source through standard input.
+It drains both output streams while it transfers source. The result contains
+exactly `std_out` and `std_err`. Empty streams and newlines are preserved. Invalid
+UTF-8 bytes become replacement characters. Ordinary Python errors include their
+type and message in `std_err`, without launcher traceback frames.
+
+Healthy calls and ordinary Python errors retain files. Each call gets a fresh
+interpreter. Core confirms worker exit before it prepares the next worker.
+Timeouts, output overflow, observed resource failures, crashes, cancellation and
+uncertain transport outcomes quarantine the session. Core removes its container
+and never replays source. A later explicit call can create an empty session after
+removal succeeds. `close()` cancels owned work and permanently closes the runtime.
+
+Cleanup retains admission until Docker confirms removal. Failed cleanup keeps
+retrying under supervisor ownership and reports a safe error to waiting callers.
+An uncertain create followed by a 404 retains its reservation. Reconciliation
+removes stopped owned containers and preserves live or unrelated containers.
+The keeper exits on input closure or lease expiry if core disappears. Runtime
+diagnostics contain safe metadata only.
+
+Run the checks from the repository root:
+
+```sh
+cargo test --locked -p tachikoma-core
+cargo test --locked -p tachikoma-core --lib execution::runtime::tests::docker_ -- --ignored --test-threads=1
+cargo clippy --locked -p tachikoma-core --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+Normal tests use local Docker socket fixtures. Live tests are ignored by default.
+Explicit live runs fail if Docker or required controls are missing. They use no
+language-model calls or provider credentials. CI defines native Linux AMD64 and
+ARM64 live-test jobs.
+
+On 2026-10-17, all nine live tests passed on macOS ARM64 Docker Desktop through
+the local Unix socket. The approved image reported Python 3.13.16. Native Linux
+CI results for this runtime change remain pending. Windows named pipes and
+cgroup v1 are not validated runtime platforms.
 
 ## Agent models and responsibilities
 
@@ -537,7 +623,7 @@ retries remain disabled to avoid multiplying attempts.
 
 - `main.rs`: thin executable that calls the library's `serve()` function.
 - `lib.rs`: public library modules, configuration exports and server startup.
-- `execution/`: private Docker prerequisite models, local adapter and socket-fixture tests.
+- `execution/`: private Docker preparation, Python launcher, session supervisor and runtime tests.
 - `images/base-execution-py3.x/`: trusted image build, smoke check, maintenance guide and approved published reference.
 - `agent/models.rs`: configuration, prompt/schema sources, outcomes and errors.
 - `agent/profile.rs`: runtime JSON profile loading and profile-relative file resolution.

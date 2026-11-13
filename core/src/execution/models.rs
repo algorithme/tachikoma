@@ -218,9 +218,233 @@ impl fmt::Display for DockerPreflightError {
 
 impl std::error::Error for DockerPreflightError {}
 
+// Private contracts for the runtime slice. Remove this allowance with tool integration.
+#[allow(dead_code)]
+pub(super) mod runtime {
+    use std::{fmt, time::Duration};
+
+    use serde::{Deserialize, Serialize};
+
+    pub(crate) struct CodeExecutionRequest {
+        pub(crate) code: String,
+    }
+
+    #[derive(Serialize, PartialEq, Eq)]
+    pub(crate) struct CodeExecutionResult {
+        pub(crate) std_out: String,
+        pub(crate) std_err: String,
+    }
+
+    impl fmt::Debug for CodeExecutionResult {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("CodeExecutionResult { std_out: [REDACTED], std_err: [REDACTED] }")
+        }
+    }
+
+    #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    pub(crate) struct RuntimeProfile {
+        pub(crate) python_version: String,
+        pub(crate) modules: Vec<String>,
+        #[serde(skip)]
+        pub(crate) image: String,
+    }
+
+    /// A fixed process identity and working directory selected by core.
+    #[derive(Clone, Copy, Serialize)]
+    pub(crate) struct ExecutionIdentity {
+        pub(crate) uid: u32,
+        pub(crate) gid: u32,
+        pub(crate) directory: &'static str,
+    }
+
+    impl ExecutionIdentity {
+        pub(crate) fn docker_user(self) -> String {
+            format!("{}:{}", self.uid, self.gid)
+        }
+    }
+
+    /// A writable mount whose byte and inode limits apply to the whole session.
+    #[derive(Clone, Copy, Serialize)]
+    pub(crate) struct TmpfsPolicy {
+        pub(crate) path: &'static str,
+        pub(crate) bytes: i64,
+        pub(crate) inodes: u64,
+    }
+
+    impl TmpfsPolicy {
+        pub(crate) fn docker_options(self) -> String {
+            format!(
+                "rw,nosuid,nodev,noexec,size={},nr_inodes={},uid={},gid={},mode=0700",
+                self.bytes,
+                self.inodes,
+                ExecutionPolicy::WORKER.uid,
+                ExecutionPolicy::WORKER.gid,
+            )
+        }
+    }
+
+    /// Fixed host policy shared by container setup and the trusted launcher.
+    pub(crate) struct ExecutionPolicy;
+
+    impl ExecutionPolicy {
+        pub(crate) const EXECUTION: Duration = Duration::from_secs(30);
+        pub(crate) const REQUEST: Duration = Duration::from_secs(5);
+        pub(crate) const IMAGE_PULL: Duration = Duration::from_secs(600);
+        pub(crate) const HEARTBEAT: Duration = Duration::from_secs(5);
+        pub(crate) const KEEPER_LEASE: Duration = Duration::from_secs(60);
+        pub(crate) const SOURCE: usize = 64 * 1024;
+        pub(crate) const OUTPUT: usize = 64 * 1024;
+        pub(crate) const READINESS: usize = 2048;
+        pub(crate) const MEMORY: i64 = 128 * 1024 * 1024;
+        pub(crate) const SWAP: i64 = 0;
+        pub(crate) const CPUS: i64 = 1;
+        pub(crate) const SESSIONS: usize = 4;
+        pub(crate) const PIDS: i64 = 32;
+        pub(crate) const WORKSPACE: TmpfsPolicy = TmpfsPolicy {
+            path: "/workspace",
+            bytes: 16 * 1024 * 1024,
+            inodes: 4096,
+        };
+        pub(crate) const TEMPORARY: TmpfsPolicy = TmpfsPolicy {
+            path: "/tmp",
+            bytes: 8 * 1024 * 1024,
+            inodes: 1024,
+        };
+        pub(crate) const SHARED_MEMORY: TmpfsPolicy = TmpfsPolicy {
+            path: "/dev/shm",
+            bytes: 4 * 1024 * 1024,
+            inodes: 256,
+        };
+        pub(crate) const MOUNTS: [TmpfsPolicy; 3] =
+            [Self::WORKSPACE, Self::TEMPORARY, Self::SHARED_MEMORY];
+        pub(crate) const KEEPER: ExecutionIdentity = ExecutionIdentity {
+            uid: 10000,
+            gid: 10000,
+            directory: "/",
+        };
+        pub(crate) const WORKER: ExecutionIdentity = ExecutionIdentity {
+            uid: 10001,
+            gid: 10001,
+            directory: Self::WORKSPACE.path,
+        };
+        pub(crate) const MODULES: [&str; 7] = [
+            "math",
+            "decimal",
+            "fractions",
+            "statistics",
+            "itertools",
+            "csv",
+            "json",
+        ];
+
+        /// Serialize only host-selected values for the fixed launcher command.
+        pub(crate) fn launcher_json() -> String {
+            #[derive(Serialize)]
+            struct LauncherPolicy {
+                keeper: ExecutionIdentity,
+                worker: ExecutionIdentity,
+                mounts: [TmpfsPolicy; 3],
+                source_bytes: usize,
+                memory_bytes: i64,
+                swap_bytes: i64,
+                cpus: i64,
+                pids: i64,
+                lease_seconds: u64,
+                modules: [&'static str; 7],
+            }
+
+            serde_json::to_string(&LauncherPolicy {
+                keeper: Self::KEEPER,
+                worker: Self::WORKER,
+                mounts: Self::MOUNTS,
+                source_bytes: Self::SOURCE,
+                memory_bytes: Self::MEMORY,
+                swap_bytes: Self::SWAP,
+                cpus: Self::CPUS,
+                pids: Self::PIDS,
+                lease_seconds: Self::KEEPER_LEASE.as_secs(),
+                modules: Self::MODULES,
+            })
+            .expect("fixed launcher policy contains only JSON-safe fields")
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Lifecycle {
+        Preparing,
+        Available,
+        Busy,
+        Quarantined,
+        Closed,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum ExecutionOutcome {
+        Timeout,
+        OutputLimit,
+        ResourceLimit,
+        WorkerLost,
+        Cancelled,
+        CleanupFailed,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum ExecutionError {
+        InvalidInput,
+        SetupFailure,
+        AdmissionFull,
+        SessionLost(ExecutionOutcome),
+        Closed,
+    }
+
+    impl fmt::Display for ExecutionError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(match self {
+                Self::InvalidInput => "Python source exceeds the 64 KiB limit.",
+                Self::SetupFailure => {
+                    "The private Python runtime could not establish its required controls."
+                }
+                Self::AdmissionFull => {
+                    "All four private execution session reservations are in use."
+                }
+                Self::SessionLost(_) => {
+                    "The execution session was lost. Its source will not be replayed."
+                }
+                Self::Closed => "The private Python runtime is closed.",
+            })
+        }
+    }
+
+    impl std::error::Error for ExecutionError {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn result_serialization_and_diagnostics_preserve_the_boundary() {
+        use super::runtime::*;
+        use serde_json::json;
+        let result = CodeExecutionResult {
+            std_out: "private-output\n".into(),
+            std_err: String::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            json!({"std_out": "private-output\n", "std_err": ""})
+        );
+        assert!(!format!("{result:?}").contains("private-output"));
+        for error in [
+            ExecutionError::InvalidInput,
+            ExecutionError::SetupFailure,
+            ExecutionError::SessionLost(ExecutionOutcome::WorkerLost),
+            ExecutionError::Closed,
+        ] {
+            assert!(!format!("{error:?}: {error}").contains("private-output"));
+        }
+    }
 
     #[test]
     fn endpoint_defaults_and_explicit_local_override() {
