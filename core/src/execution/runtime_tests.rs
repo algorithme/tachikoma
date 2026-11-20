@@ -59,6 +59,41 @@ async fn docker_arithmetic_streams_and_python_errors() {
 
 #[tokio::test]
 #[ignore = "requires local Linux Docker and the approved native image"]
+async fn docker_main_module_resolves_user_definitions_and_is_fresh() {
+    let runtime = live().await;
+    let source = r#"
+import __main__
+from typing import get_type_hints
+
+class Payload:
+    pass
+
+class Message:
+    item: "Payload"
+
+assert get_type_hints(Message)["item"] is Payload
+assert vars(__main__) is globals()
+assert "worker" not in globals() and "controls" not in globals()
+sentinel = "user module"
+assert __main__.sentinel == sentinel
+print("main module ready")
+"#;
+    let result = runtime.execute_code(code(source)).await.unwrap();
+    let fresh = runtime
+        .execute_code(code(
+            "import __main__\nassert vars(__main__) is globals()\nassert 'sentinel' not in globals()\nassert 'Payload' not in vars(__main__)\nprint('fresh')",
+        ))
+        .await
+        .unwrap();
+    runtime.close().await.unwrap();
+    assert_eq!(result.std_err, "");
+    assert_eq!(result.std_out, "main module ready\n");
+    assert_eq!(fresh.std_err, "");
+    assert_eq!(fresh.std_out, "fresh\n");
+}
+
+#[tokio::test]
+#[ignore = "requires local Linux Docker and the approved native image"]
 async fn docker_fresh_workers_retained_files_isolation_and_serial_calls() {
     let runtime = live().await;
     runtime.execute_code(code("import math, signal\nx = 123\nmath.pi = 0\nsignal.signal(signal.SIGUSR1, lambda *a: None)\nopen('kept', 'w').write('session data')")).await.unwrap();
@@ -398,7 +433,7 @@ async fn docker_missing_kernel_controls_reject_readiness() {
             .unwrap();
         checked.client.start_container(&name, None).await.unwrap();
         let (state, _) = watch::channel(Lifecycle::Preparing);
-        let session = Session {
+        let mut session = Session {
             client: checked.client.clone(),
             image: checked.image.reference().into(),
             name,
@@ -469,6 +504,7 @@ mod fixtures {
             after: Vec<(u8, Vec<u8>)>,
             stall: bool,
         },
+        Disconnect,
         Stall,
     }
 
@@ -659,6 +695,7 @@ mod fixtures {
                     std::future::pending::<()>().await;
                 }
             }
+            Response::Disconnect => {}
             Response::Stall => std::future::pending::<()>().await,
         }
     }
@@ -889,6 +926,92 @@ mod fixtures {
         assert_eq!(error, lost(ExecutionOutcome::WorkerLost));
         assert!(!format!("{error:?}: {error}").contains("private-daemon-error"));
         runtime.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_creation_releases_admission_without_cleanup_requests() {
+        let statuses = [400, 404, 409, 400, 404, 409];
+        let daemon = Fixture::new(
+            statuses.map(|status| Response::Json(status, json!({"message": "rejected"}))),
+        )
+        .await;
+        let supervisor = Arc::new(ExecutionSupervisor::new());
+        let (_closed, receiver) = watch::channel(false);
+        for _ in statuses {
+            let (mut ticket, ready) = supervisor
+                .start(&daemon.checked(), receiver.clone())
+                .unwrap();
+            assert_eq!(ready.await.unwrap(), Err(ExecutionError::SetupFailure));
+            ticket.wait_for_cleanup().await.unwrap();
+            assert_eq!(supervisor.admission.available_permits(), 4);
+        }
+        let script = daemon.script.lock().unwrap();
+        assert_eq!(script.calls.len(), statuses.len());
+        assert!(
+            script
+                .calls
+                .iter()
+                .all(|(path, _)| path.starts_with("/containers/create?"))
+        );
+    }
+
+    #[tokio::test]
+    async fn uncertain_creation_errors_retain_admission_until_confirmed_removal() {
+        for response in [
+            Response::Json(500, json!({"message": "private-daemon-error"})),
+            Response::Json(201, json!({"Id": 7, "Warnings": []})),
+        ] {
+            let daemon = Fixture::new([
+                response,
+                Response::Json(404, json!({"message": "absent"})),
+                Response::Inspection(None),
+                Response::Json(204, Value::Null),
+            ])
+            .await;
+            let supervisor = Arc::new(ExecutionSupervisor::new());
+            let (_closed, receiver) = watch::channel(false);
+            let (mut ticket, ready) = supervisor.start(&daemon.checked(), receiver).unwrap();
+            assert_eq!(ready.await.unwrap(), Err(ExecutionError::SetupFailure));
+            assert_eq!(
+                ticket.wait_for_cleanup().await,
+                Err(lost(ExecutionOutcome::CleanupFailed))
+            );
+            assert_eq!(supervisor.admission.available_permits(), 3);
+            wait_until(|| supervisor.admission.available_permits() == 4).await;
+            ticket.wait_for_cleanup().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_deletion_reply_retries_the_recovered_container_id() {
+        let daemon = Fixture::new([
+            Response::Disconnect,
+            Response::Inspection(None),
+            Response::Disconnect,
+            Response::Json(404, json!({"message": "removed"})),
+        ])
+        .await;
+        let supervisor = Arc::new(ExecutionSupervisor::new());
+        let (_closed, receiver) = watch::channel(false);
+        let (mut ticket, ready) = supervisor.start(&daemon.checked(), receiver).unwrap();
+        assert_eq!(ready.await.unwrap(), Err(ExecutionError::SetupFailure));
+        assert_eq!(
+            ticket.wait_for_cleanup().await,
+            Err(lost(ExecutionOutcome::CleanupFailed))
+        );
+        assert_eq!(supervisor.admission.available_permits(), 3);
+        wait_until(|| supervisor.admission.available_permits() == 4).await;
+        ticket.wait_for_cleanup().await.unwrap();
+        let script = daemon.script.lock().unwrap();
+        assert_eq!(script.calls.len(), 4);
+        assert!(
+            script.calls[1]
+                .0
+                .starts_with("/containers/tachikoma-python-")
+        );
+        assert!(script.calls[1].0.ends_with("/json"));
+        assert!(script.calls[2].0.starts_with("/containers/container?"));
+        assert_eq!(script.calls[2].0, script.calls[3].0);
     }
 
     #[tokio::test]

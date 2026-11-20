@@ -360,7 +360,8 @@ impl Session {
     ) -> Result<(AttachContainerResults, PreparedWorker), ExecutionError> {
         let body = container_config(&self.image, &self.name);
         self.creation_attempted = true;
-        let response = request(
+        let response = match timeout(
+            ExecutionPolicy::REQUEST,
             self.client.create_container(
                 Some(
                     CreateContainerOptionsBuilder::default()
@@ -371,6 +372,17 @@ impl Session {
             ),
         )
         .await
+        {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(DockerError::DockerResponseServerError {
+                status_code: 400 | 404 | 409,
+                ..
+            })) => {
+                self.creation_attempted = false;
+                Err(ExecutionError::SetupFailure)
+            }
+            _ => Err(ExecutionError::SetupFailure),
+        }
         .map_err(setup("container creation"))?;
         self.container_id = Some(response.id);
         if !response.warnings.is_empty() {
@@ -482,7 +494,7 @@ impl Session {
         })
     }
 
-    async fn remove(&self) -> Result<(), ExecutionError> {
+    async fn remove(&mut self) -> Result<(), ExecutionError> {
         if !self.creation_attempted {
             return Ok(());
         }
@@ -503,7 +515,9 @@ impl Session {
                 {
                     return Err(lost(ExecutionOutcome::CleanupFailed));
                 }
-                inspected.id.ok_or(lost(ExecutionOutcome::CleanupFailed))?
+                let id = inspected.id.ok_or(lost(ExecutionOutcome::CleanupFailed))?;
+                self.container_id = Some(id.clone());
+                id
             }
         };
         let result = timeout(

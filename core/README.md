@@ -152,12 +152,19 @@ uncertain transport outcomes quarantine the session. Core removes its container
 and never replays source. A later explicit call can create an empty session after
 removal succeeds. `close()` cancels owned work and permanently closes the runtime.
 
-Cleanup retains admission until Docker confirms removal. Failed cleanup keeps
-retrying under supervisor ownership and reports a safe error to waiting callers.
-An uncertain create followed by a 404 retains its reservation. Reconciliation
-removes stopped owned containers and preserves live or unrelated containers.
-The keeper exits on input closure or lease expiry if core disappears. Runtime
-diagnostics contain safe metadata only.
+Cleanup retains admission until Docker confirms removal or explicitly rejects
+creation (HTTP 400/404/409). Failed cleanup keeps retrying under supervisor ownership
+and reports a safe error to waiting callers. Ownership-verified IDs are retained
+across retries; a deletion 404 for that ID confirms removal. An uncertain create
+followed only by a name-lookup 404 retains its reservation. Reconciliation removes
+exited/dead owned containers and preserves live or unrelated containers. A started
+keeper exits on input closure or lease expiry. Runtime diagnostics contain safe
+metadata only.
+
+shortcut: A core crash between container creation and startup can leave an owned
+`created` container behind: its keeper never ran, and reconciliation skips it.
+Coordinated recovery that preserves other live runtimes' preparations is required
+before the first agent-tool integration, including other processes if supported.
 
 Run the checks from the repository root:
 

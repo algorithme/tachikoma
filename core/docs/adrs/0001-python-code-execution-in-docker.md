@@ -92,6 +92,12 @@ uncertain cleanup, including after callers drop. The keeper exits on input closu
 or a 60-second heartbeat lease expiry. Stopped-container reconciliation preserves
 live sessions and unrelated containers.
 
+shortcut: A crash between creation and startup can leave an owned `created`
+container behind; neither a keeper lease nor the exited/dead reconciliation sweep
+cleans it up. Before the first agent-tool integration, a coordinated recovery fix
+must reclaim these orphans while preserving active preparations, including other
+processes if supported. This remains a required implementation gate.
+
 Socket fixtures test transport, readiness gates, output limits, cancellation,
 uncertain creation, cleanup reservations and ownership. All nine live tests passed
 on macOS ARM64 Docker Desktop through its Unix socket, with Python 3.13.16.

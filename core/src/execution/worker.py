@@ -10,6 +10,7 @@ import resource
 import select
 import sys
 import threading
+import types
 
 def keeper(policy):
     # PID 1 has a different identity. Its sole input is a renewable lease.
@@ -159,7 +160,9 @@ def worker(policy):
         source = sys.stdin.buffer.read(policy["source_bytes"] + 1)
         if len(source) > policy["source_bytes"]:
             os._exit(70)
-        exec(compile(source, "<code>", "exec"), {"__name__": "__main__"})
+        main_module = types.ModuleType("__main__")
+        sys.modules["__main__"] = main_module
+        exec(compile(source, "<code>", "exec"), main_module.__dict__)
     except BaseException as error:
         print(f"{type(error).__name__}: {error}", file=sys.stderr, flush=True)
         if isinstance(error, MemoryError) or (isinstance(error, OSError) and error.errno in
